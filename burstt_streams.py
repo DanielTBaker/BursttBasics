@@ -44,16 +44,7 @@ class Stream:
         self.name = name
 
         self._read_config(config)
-        ## List of files
-        self.files = braced_glob(self.dataDir)
-        self.files.sort()
-        self._get_fbystamp()
 
-        ## Generate start times for each block
-        self._get_epochs(notebook,progressOrder)
-
-    def _get_fbystamp(self):
-        self.fbystamp = []
 
     def _get_block_byte(self):
         self.blockByte = 0
@@ -117,17 +108,6 @@ class Stream:
         self.nChan = 0
         self._get_block_byte()
         
-    def _get_epochs(self,notebook, progressOrder = -1):
-        """ Determine start time for all blocks in dataset.
-
-        Parameters
-        ----------
-        progressOrder: int, optional
-            Base recurision level for progress bars. Defaults to -1 for no bars
-        """
-        ## Calculate start times for each block
-        self.blockStart = np.zeros((len(self.fbystamp),self.nBlock,self.nf))*np.inf*u.s
-        self.nEpochs = 0
 
     def get_block_from_time(self,time):
         """Determine epoch and block number containing a given time.
@@ -500,18 +480,6 @@ class Baseband(Stream):
         if self.sourceType == 'pulsar':
             self._pulsar_prep(config)
 
-    def _get_fbystamp(self):
-        if  os.path.exists(self.fbystampFile):
-            with open(self.fbystampFile, 'rb') as f:
-                # Pickle the 'data' dictionary using the highest protocol available.
-                self.fbystamp = pkl.load(f)
-        else:
-            self.fbystamp = file_order(self.files,blockFrame=self.blockFrame,headSize = 64,nBlock=self.nf*self.nBlock)[0]
-            with open(self.fbystampFile, 'wb') as f:
-                # Pickle the 'data' dictionary using the highest protocol available.
-                pkl.dump(self.fbystamp, f, pkl.HIGHEST_PROTOCOL)
-        
-
     def _get_block_byte(self):
         self.blockByte = self.blockFrame * self.nChan
 
@@ -536,19 +504,10 @@ class Baseband(Stream):
         self.intensityDir = os.path.join(self.dateDir,'Data','intensities')
         self.correlationDir = os.path.join(self.dateDir,'Data','correlations')
 
-        self.blockStartFile = config[self.name].get('fbystampFile',
-                                           os.path.join(self.dateDir,
-                                                        f'blockStart_{self.obsDate}_{self.sourceName}_{self.name}.npy'))
-        self.fbystampFile = config[self.name].get('fbystampFile',
-                                           os.path.join(self.dateDir,
-                                                        f'fbystamp_{self.obsDate}_{self.sourceName}_{self.name}.dat'))
         self.station = config.get(self.name,"station")
         self.headSize = config[self.name].getint('headSize',64)
         ## Reference Time
         self.epoch0 = Time(config.get('Observation Properties', 'date') + ' 16:00:00')
-
-        ## Location of data files
-        self.dataDir = config.get(self.name, 'dataDir')
 
         ## Files per Ring Per Epoch:
         self.nf = config.getint(self.name, 'ringFiles')
@@ -596,48 +555,21 @@ class Baseband(Stream):
 
         self._get_block_byte()
         self.rebin=1
-        
-    def _get_epochs(self,notebook, progressOrder = -1):
-        """ Determine start time for all blocks in dataset.
 
-        Parameters
-        ----------
-        progressOrder: int, optional
-            Base recurision level for progress bars. Defaults to -1 for no bars
-        """
-        ## Calculate start times for each block
-        if os.path.exists(self.blockStartFile):
-            self.blockStart = np.load(self.blockStartFile)*u.s
-        else:
-            self.blockStart = np.zeros((len(self.fbystamp),self.nBlock,self.nf))*np.nan*u.s
-            iter0 = range(self.blockStart.shape[0])
-            if self.notebook and progressOrder>-1:
-                iter0 = tqdm(iter0,position=progressOrder,leave=(progressOrder==0))
-            for e in iter0:
-                iter1 = range(len(self.fbystamp[e]))
-                if self.notebook and progressOrder>-1:
-                    iter1 = tqdm(iter1,position=progressOrder+1,leave=False)
-                for f in iter1:
-                    if len(self.fbystamp[e]) < self.nf:
-                        print(f'Folder number {e} has only {len(self.fbystamp[e])}/{self.nf} files')
-                    fh = open(self.fbystamp[e][f],'rb')
-                    fID = int(self.fbystamp[e][f].split('_')[-1][1:])
-                    iter2 = range(self.nBlock)
-                    if self.notebook and progressOrder>-1:
-                        iter2 = tqdm(iter2,position=progressOrder+2,leave=False)
-                    for b in iter2:
-                        p = (self.blockByte + 64)*b
-                        fh.seek(p)
-                        hd = fh.read(64)
-                        tmp = decHeader2(hd,verbose=False)
-                        try:
-                            ep = tmp[2]*u.s + 2*u.s + (tmp[0]//2)*self.frameSec
-                            self.blockStart[e,b,fID]=ep
-                        except:
-                            continue
-                    fh.close()
-            np.save(self.blockStartFile,self.blockStart.value)
-        self.nEpochs = int(self.blockStart.shape[0]//self.nOrder)
+        self.machines = config.get(self.name,"machines").split(',')
+        self.rings = []
+        for machine in self.machines:
+            for ring in range(2):
+                ringFile = os.path.join(self.dateDir,f'{machine}_ring{ring}.pkl')
+                if os.path.exists(ringFile):
+                    with open(ringFile,'rb') as f:
+                        self.rings.append(pkl.load(f))
+                else:
+                    dataDir = f'/burstt_home/shared/{self.station}/{machine}/{self.dataDir}/'
+                    fileList = os.listdir(dataDir)
+                    self.rings.append(Ring(machine, ring, self.nBLock, fileList, self.blockByte, self.frameSec))
+                    with open(ringFile, 'rb') as f:
+                        pkl.dump(self.rings[-1], f, pkl.HIGHEST_PROTOCOL)
 
     def load_chain(self,order,segment,verbose=False):
         files = self.fbystamp[self.nEpochs*order+segment[0]]
@@ -700,8 +632,6 @@ class Intensity(Stream):
             with open(self.fbystampFile, 'wb') as f:
                 # Pickle the 'data' dictionary using the highest protocol available.
                 pkl.dump(self.fbystamp, f, pkl.HIGHEST_PROTOCOL)
-
-        
 
     def _get_block_byte(self):
         self.blockByte = int(self.blockFrame/self.rebin) * self.nChan * self.nBeams * 2
@@ -790,8 +720,6 @@ class Intensity(Stream):
 
         self._get_block_byte()
 
-        
-        
     def _get_epochs(self,notebook, progressOrder = -1):
         """ Determine start time for all blocks in dataset.
 
@@ -900,3 +828,53 @@ class Intensity(Stream):
         v2 = sigma_clip(v, sigma=2.0)
         self.profileFlat = np.mean(self.profile[0,~v2.mask],0)
         self.ToAs_from_pref(self.profilePhases[np.argmax(self.profileFlat)]) 
+
+
+class Ring:
+    """
+    Holds information and functionality for a single ring of baseband data
+    """
+
+    def __init__(self,machine: str,
+                 ringID: int,
+                 nBLock : int,
+                 fileList: list,
+                 blockByte: int,
+                 frameSec,
+                 nChan,
+                 blockFrame
+                 ) -> None:
+        self.machine = machine
+        self.ringID = ringID
+        self.fileList = fileList
+        self.nBlock = nBLock
+        self.blockByte = blockByte
+        self.frameSec = frameSec
+        self.blockFrame = blockFrame
+        self.nChan = nChan
+        self._block_starts()
+
+    def _block_starts(self):
+        nFiles = len(self.fileList)
+        self.blockStarts = np.zeros(nFiles*self.nBlock)*np.nan*u.s
+        self.blockFileID = np.linspace(0,nFiles-1,nFiles).repeat(self.nBlock)
+        self.blockID = np.tile(np.linspace(0,self.nBlock-1,self.nBlock),nFiles)
+        for fileID,file in enumerate(self.fileList):
+            with open(file,'rb') as fh:
+                for b in range(self.nBlock):
+                    p = (self.blockByte + 64)*b
+                    try:
+                        fh.seek(p)
+                        hd = fh.read(64)
+                        tmp = decHeader2(hd,verbose=False)
+                        ep = tmp[2]*u.s + 2*u.s + (tmp[0]//2)*self.frameSec
+                        self.blockStarts[fileID*self.nBlock+b]=ep
+                    except:
+                        break
+        order = np.argsort(self.blockStarts)
+        self.blockStarts = self.blockStarts[order]
+        self.blockFileID = self.blockFileID[order]
+        self.blockID = self.blockID[order]
+        self.earliest = np.nanmin(self.blockStarts)
+        self.latest = np.nanmax(self.blockStarts)+np.nanmedian(np.diff(self.blockStarts))
+        
