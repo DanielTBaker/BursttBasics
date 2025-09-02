@@ -212,7 +212,6 @@ class FoldingProcess(Process):
             upChan = 1
         else:
             startBlock,numBlocks,nBins,fref,upChan = x
-        nf = self.observations[0].nf
         first = True
         didFold = False
         folded = np.zeros(0)
@@ -220,18 +219,15 @@ class FoldingProcess(Process):
             if self.verbose:
                 t = Time.now()
             block = startBlock+blockID
-            eid = int(block//(nf*self.observations[0].nBlock))
-            bid = block - eid*(nf*self.observations[0].nBlock)
-            if np.isfinite(self.observations[0].blockStart[eid,bid//nf,np.mod(bid,nf)]):
-                A,B = self.observations[0].fold_block(fref,eid,bid,nBins,upChan=upChan)
-                if first:
-                    folded = A
-                    wts = B
-                    first = False
-                    didFold = True
-                else:
-                    folded += A
-                    wts += B
+            A,B = self.observations[0].fold_block(fref,block,nBins,upChan=upChan)
+            if first:
+                folded = A
+                wts = B
+                first = False
+                didFold = True
+            else:
+                folded += A
+                wts += B
             if self.verbose:
                 dt = (Time.now()-t).to_value(u.min)
                 print(f'pid{self.poolID}: {blockID+1}/{numBlocks} Complete in {dt:.2f}')

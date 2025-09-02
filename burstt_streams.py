@@ -509,8 +509,8 @@ class Baseband(Stream):
         ## Reference Time
         self.epoch0 = Time(config.get('Observation Properties', 'date') + ' 16:00:00')
 
-        ## Files per Ring Per Epoch:
-        self.nf = config.getint(self.name, 'ringFiles')
+        # ## Files per Ring Per Epoch:
+        # self.nf = config.getint(self.name, 'ringFiles')
 
         ## Length of frame (us)
         if 'frameSec'.lower() in config.options(self.name):
@@ -556,48 +556,48 @@ class Baseband(Stream):
         self._get_block_byte()
         self.rebin=1
 
+        self.dataDir = config.get(self.name,"dataDir")
         self.machines = config.get(self.name,"machines").split(',')
-        self.rings = []
+        self.rings : list[Ring] = []
         for machine in self.machines:
             for ring in range(2):
                 ringFile = os.path.join(self.dateDir,f'{machine}_ring{ring}.pkl')
                 if os.path.exists(ringFile):
-                    with open(ringFile,'rb') as f:
-                        self.rings.append(pkl.load(f))
+                    self.rings.append(Ring.from_pickle(ringFile))
                 else:
                     dataDir = f'/burstt_home/shared/{self.station}/{machine}/{self.dataDir}/'
-                    fileList = os.listdir(dataDir)
-                    self.rings.append(Ring(machine, ring, self.nBLock, fileList, self.blockByte, self.frameSec))
-                    with open(ringFile, 'rb') as f:
+                    fileList = [os.path.join(dataDir,x) for x in os.listdir(dataDir) if (f'ring{ring}' in x)]
+                    self.rings.append(Ring(machine, ring, self.nBlock, fileList, self.blockByte, self.frameSec,self.nChan,self.blockFrame,self.headSize))
+                    with open(ringFile, 'wb') as f:
                         pkl.dump(self.rings[-1], f, pkl.HIGHEST_PROTOCOL)
+        self.earliest = Time(max([x.earliest for x in self.rings]).value, format='unix')
+        self.latest = Time(min([x.latest for x in self.rings]).value, format='unix')
 
-    def load_chain(self,order,segment,verbose=False):
-        files = self.fbystamp[self.nEpochs*order+segment[0]]
-        bID = np.linspace(0,segment[2]-1,segment[2],dtype=int)+segment[1]
-        fID = np.mod(bID,self.nf)
-        bID2 = (bID//self.nf).astype(int)
-        spec  = np.zeros((segment[2], self.blockFrame, self.nChan), dtype=np.complex64)
-        pcnt  = np.zeros(segment[2], dtype=np.int64)
-        epoch = np.zeros(segment[2])
+    def fold_block(self,fref,block,nBins = 128,upChan = 1):
+        try:
+            if upChan==1:
+                dispersionDelay = ((self.DM/K)*(1/self.freq**2 - 1/fref**2)).to(u.s)
+            else:
+                freqUP = np.linspace(self.freq[0],self.freq[-1],self.nChan0*upChan)
+                dispersionDelay = ((self.DM/K)*(1/freqUP**2 - 1/fref**2)).to(u.s)
+        except:
+            dispersionDelay = np.zeros(self.freq.shape[0]*upChan)*u.s
+        folded = np.zeros((self.nChan0*upChan,nBins))
+        wts = np.zeros((self.nChan0*upChan,nBins))
+        spec = np.zeros((self.blockFrame//upChan,self.nChan*upChan))
+        for order in range(self.nOrder):
+            spec[:,:],times = self.rings[order]._read_block(block)
+            pulseFreq = self.polyco.eval_spin_freq(times.mjd).mean()*u.Hz
+            phaseRef = self.polyco.eval_phase(times.mjd)
 
-        for i in range(segment[2]):
-            tmp = loadBeam(files[fID[i]],
-                           nStart=bID2[i],
-                           nBlock=1,
-                           nFrame=self.blockFrame,
-                           nChan=self.nChan,
-                           hdlen=self.headSize,
-                           verbose=verbose)
-            spec[i]  = tmp[0][0]
-            pcnt[i]  = tmp[1][0]
-            epoch[i] = tmp[2][0]
-        return(spec, pcnt, epoch)
-    
-    def read_order(self,epoch,startBlock,length,order,verbose=False):
-        spec = super().read_order(epoch,startBlock,length,order,verbose)
-        spec = np.reshape(spec,(-1,self.nChan))
-        return(spec)
-
+            for i in range(spec.shape[1]):
+                column = np.abs(spec[:,i])**2
+                # phases = self.polyco.eval_phase((times-dispersionDelay[order*self.nChan+i]).mjd)
+                pShift = (dispersionDelay[order*self.nChan+i]*pulseFreq).to(u.dimensionless_unscaled)
+                phases = np.mod(phaseRef-pShift+.5,1)-.5
+                folded[order*self.nChan+i,:],__ = np.histogram(phases[np.isfinite(column)],weights=column[np.isfinite(column)],bins=np.linspace(-.5,.5,nBins+1))
+                wts[order*self.nChan+i,:],__ = np.histogram(phases[np.isfinite(column)],bins=np.linspace(-.5,.5,nBins+1))
+        return(folded,wts)
 
 class Intensity(Stream):
     """
@@ -835,30 +835,35 @@ class Ring:
     Holds information and functionality for a single ring of baseband data
     """
 
+
     def __init__(self,machine: str,
                  ringID: int,
-                 nBLock : int,
+                 nBlock : int,
                  fileList: list,
                  blockByte: int,
                  frameSec,
                  nChan,
-                 blockFrame
+                 blockFrame,
+                 headSize = 64,
+                 calcStarts = True
                  ) -> None:
         self.machine = machine
         self.ringID = ringID
         self.fileList = fileList
-        self.nBlock = nBLock
+        self.nBlock = nBlock
         self.blockByte = blockByte
         self.frameSec = frameSec
         self.blockFrame = blockFrame
         self.nChan = nChan
-        self._block_starts()
+        self.headSize = headSize
+        if calcStarts:
+            self._block_starts()
 
     def _block_starts(self):
         nFiles = len(self.fileList)
         self.blockStarts = np.zeros(nFiles*self.nBlock)*np.nan*u.s
-        self.blockFileID = np.linspace(0,nFiles-1,nFiles).repeat(self.nBlock)
-        self.blockID = np.tile(np.linspace(0,self.nBlock-1,self.nBlock),nFiles)
+        self.blockFileID = np.linspace(0,nFiles-1,nFiles).repeat(self.nBlock).astype(int)
+        self.blockID = np.tile(np.linspace(0,self.nBlock-1,self.nBlock),nFiles).astype(int)
         for fileID,file in enumerate(self.fileList):
             with open(file,'rb') as fh:
                 for b in range(self.nBlock):
@@ -867,7 +872,7 @@ class Ring:
                         fh.seek(p)
                         hd = fh.read(64)
                         tmp = decHeader2(hd,verbose=False)
-                        ep = tmp[2]*u.s + 2*u.s + (tmp[0]//2)*self.frameSec
+                        ep = tmp[2]*u.s + 2*u.s + (tmp[0]/2)*self.frameSec
                         self.blockStarts[fileID*self.nBlock+b]=ep
                     except:
                         break
@@ -877,4 +882,68 @@ class Ring:
         self.blockID = self.blockID[order]
         self.earliest = np.nanmin(self.blockStarts)
         self.latest = np.nanmax(self.blockStarts)+np.nanmedian(np.diff(self.blockStarts))
+        self.totalBlocks = self.blockStarts[np.isfinite(self.blockStarts)].shape[0]
         
+    def _read_block(self,blockID):
+        readFile = self.fileList[self.blockFileID[blockID]]
+        readBlock = self.blockID[blockID]
+        readStart = self.blockStarts[blockID]
+        if np.isfinite(readStart):
+            spec,pcnt,epoch = loadBeam(readFile,
+                        nStart=readBlock,
+                        nBlock=1,
+                        nFrame=self.blockFrame,
+                        nChan=self.nChan,
+                        hdlen=self.headSize)
+            spec=spec[0]
+            times = Time(readStart.to_value(u.s),format='unix') + np.linspace(0,self.blockFrame-1,self.blockFrame)*self.frameSec
+            success = True
+        else:
+            spec = np.zeros((self.blockFrame,self.nChan),dtype=complex)*np.nan
+            times = np.zeros(self.blockFrame)*np.nan*u.s
+            success = False
+        return(spec,times)
+    
+    def read_blocks_containing(self,startTime,endTime,gapFill=False):
+        startBlock = np.argwhere(self.blockStarts>startTime).min()-1
+        endBlock = np.argwhere(self.blockStarts>endTime).min()-1
+        toRead = (startBlock-endBlock)+1
+        spec = np.zeros((0,self.nChan),dtype=complex)
+        times = Time(np.zeros(0)*u.s,format='unix')
+        for i in range(toRead):
+            specNew,timesNew,success = self._read_block(startBlock+i)
+            if gapFill:
+                jump = np.round(((timesNew[0]-times[-1])/self.frameSec).to(u.dimensionless_unscaled))
+                if jump>1:
+                    times = np.concatenate((times,
+                                            times[-1]+np.linspace(1,jump-1,jump-1)*self.frameSec),
+                                            axis=0)
+                    spec = np.concatenate((spec,np.zeros((jump-1,self.nChan),dtype=complex)*(np.nan+1j*np.nan)),axis=0)
+                times = np.concatenate((times,timesNew),axis=0)
+                spec = np.concatenate((spec,specNew),axis=0)
+            else:
+                times = np.concatenate((times,timesNew),axis=0)
+                spec = np.concatenate((spec,specNew),axis=0)
+        return(spec,times)
+            
+    @classmethod
+    def from_pickle(cls,file,**kwargs):
+        with open(file,'rb') as f:
+                old = pkl.load(f)
+        needed = ['machine','ringID','nBlock','fileList','blockByte','frameSec','nChan','blockFrame']
+
+        for attr in needed:
+            if hasattr(old,attr):
+                kwargs.update({attr : getattr(old,attr)})
+            if not attr in kwargs:
+                raise AttributeError(f'Missing {attr}')
+        kwargs.update({'calcStarts': False})
+        new = cls(**kwargs)
+        new.blockStarts = old.blockStarts 
+        new.blockFileID = old.blockFileID 
+        new.blockID = old.blockID 
+        new.earliest = old.earliest 
+        new.latest = old.latest 
+        new.totalBlocks = old.totalBlocks 
+        return(new)
+

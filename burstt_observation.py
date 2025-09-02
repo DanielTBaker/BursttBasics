@@ -66,10 +66,8 @@ class Observation:
                 self.streams.append(Baseband(self.config,s))
             else:
                 self.streams.append(Intensity(self.config,s))
-        self.earliest = Time(np.array([np.nanmin(stream.blockStart).value for stream in self.streams]).max(),
-                        format='unix').mjd
-        self.latest = Time(np.array([np.nanmax(stream.blockStart).value+stream.blockFrame*stream.frameSec.to_value(u.s)  for stream in self.streams]).min(),
-                      format='unix').mjd
+        self.earliest = max([x.earliest for x in self.streams]).mjd
+        self.latest = min([x.latest for x in self.streams]).mjd
         if 'endTime' in self.analysisPars:
             parLatest = Time(self.analysisPars['endTime']).mjd
             self.latest = min(self.latest,parLatest)
@@ -128,15 +126,19 @@ class Observation:
             except Exception as e:
                 print(e)
                 continue
-            totalBlocks = self.streams[streamID].nf*self.streams[streamID].nBlock*self.streams[streamID].nEpochs
-            lastStarts = self.streams[streamID].blockStart[-1,:,0]
-            missing = lastStarts.shape[0]-lastStarts[np.isfinite(lastStarts)].shape[0]
-            totalBlocks-=missing*self.streams[streamID].nf
-            startBlock = int((startOff/(self.streams[streamID].blockFrame*self.streams[streamID].frameSec)).to(u.dimensionless_unscaled))
-            useBlocks = totalBlocks-startBlock
-            if np.isfinite(length):
-                lengthBlock = int((length/(self.streams[streamID].blockFrame*self.streams[streamID].frameSec)).to(u.dimensionless_unscaled))+1
-                useBlocks = min(useBlocks,lengthBlock)
+            # totalBlocks = self.streams[streamID].nf*self.streams[streamID].nBlock*self.streams[streamID].nEpochs
+            # lastStarts = self.streams[streamID].blockStart[-1,:,0]
+            # missing = lastStarts.shape[0]-lastStarts[np.isfinite(lastStarts)].shape[0]
+            # totalBlocks-=missing*self.streams[streamID].nf
+            # startBlock = int((startOff/(self.streams[streamID].blockFrame*self.streams[streamID].frameSec)).to(u.dimensionless_unscaled))
+            # useBlocks = totalBlocks-startBlock
+            # if np.isfinite(length):
+            #     lengthBlock = int((length/(self.streams[streamID].blockFrame*self.streams[streamID].frameSec)).to(u.dimensionless_unscaled))+1
+            #     useBlocks = min(useBlocks,lengthBlock)
+
+            totalBlocks = min([o.totalBlocks for o in self.streams[streamID].rings])
+            useBlocks = totalBlocks
+            startBlock = 0
 
             blocksPer = np.ones(nPool,dtype=int)*int(useBlocks//nPool)
             if useBlocks>np.sum(blocksPer):

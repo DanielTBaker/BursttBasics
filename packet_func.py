@@ -723,7 +723,7 @@ def beamUnpack(buf, hdlen=64, nFrame=51200, nChan=1024, verbose=0):
     nblock = len(buf) // (blockbytes+hdlen)
 
     srate = 400e6       # samples per sec
-    prate = srate/nChan # packets per sec
+    prate = srate/1024 # packets per sec
 
     spec = np.zeros((nblock,blockbytes), dtype=np.complex64)
     epoch = np.zeros(nblock)
