@@ -270,6 +270,8 @@ class Observation:
                     correlationStreams.append(self.streams[i])
         correlationStations = [stream.station for stream in correlationStreams]
         ToAs = correlationStreams[0].ToAs
+        ToAs = ToAs[(Time(ToAs,format='unix')-self.pulseWidth).mjd>self.earliest]
+        ToAs = ToAs[(Time(ToAs,format='unix')+self.pulseWidth).mjd<self.latest]
         if predictDelays:
             predictedDelays = np.round((self.predict_delay(Time(ToAs,format='unix'),correlationStations)/self.streams[0].frameSec).to_value(u.dimensionless_unscaled)).astype(int)
         else:

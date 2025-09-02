@@ -599,6 +599,52 @@ class Baseband(Stream):
                 wts[order*self.nChan+i,:],__ = np.histogram(phases[np.isfinite(column)],bins=np.linspace(-.5,.5,nBins+1))
         return(folded,wts)
 
+    def read_around_dedis(self,fref,tCent,tWidth,coherent = True):
+        """Read and dedisperse all subands to cover a given time range at the reference frequency
+
+        Parameters
+        ----------
+        fref: Astropy.Quantity
+            Reference frequency for dedispersion
+        tCent: Astropy.Time of Astropy.Quanity
+            Center of desired time range at reference frequency.
+        """
+        
+        ## Convert reference time to unix
+        if isinstance(tCent,Time):
+            tRef = tCent
+        else:
+            tRef = self.epoch0 + tCent
+        tEnd = tRef + tWidth
+        tStart = tRef - tWidth
+        ## Calculate dispersion delay for each frequency
+        try:
+            dispersionDelay = ((self.DM/K)*(1/self.freq**2 - 1/fref**2)).to(u.s)
+        except:
+            dispersionDelay = np.zeros(self.freq.shape[0])*u.s
+        ## Calculate number of frames in final spectrum
+        nFrames = self.time_to_frames(2*tWidth)
+    
+        ## Find start and end at each frequency
+        tStartDispersed = tStart+dispersionDelay
+        tEndDispersed = tEnd+dispersionDelay
+        spec = self.basic_spec(self.nChan0,nFrames)
+        try:
+            for order in range(self.nOrder):
+                t0 = Time.now()
+                specTemp,timeTemp = self.rings[order].read_blocks_containing(tStartDispersed[self.nChan*(order+1)-1],
+                                                                             tEndDispersed[self.nChan*order],True,0
+                                                                             )
+                fSpec = np.fft.fftshift(np.fft.fft(specTemp,axis=0),axes=0)
+                fd = thth.fft_axis(timeTemp,u.mHz)
+                phase = 2*np.pi*(dispersionDelay[np.newaxis,self.nChan*order:self.nChan*(order+1)]+(tStart-timeTemp[0]))*fd[:,np.newaxis]
+                fSpec *= np.exp(1j*phase.to_value(u.dimensionless_unscaled))
+                spec[:,self.nChan*order:self.nChan*(order+1)]=np.fft.ifft(np.fft.ifftshift(fSpec,axes=0),axis=0)[:nFrames,:]
+            return(spec,tStart)
+        except Exception as e:
+            print(f'In read_around_dedis({sys.exc_info()[2].tb_lineno}): {e}')
+            return(spec*np.nan,tStart)
+
 class Intensity(Stream):
     """
     Represent and manipulate a series of files representing
@@ -904,27 +950,36 @@ class Ring:
             success = False
         return(spec,times)
     
-    def read_blocks_containing(self,startTime,endTime,gapFill=False):
-        startBlock = np.argwhere(self.blockStarts>startTime).min()-1
-        endBlock = np.argwhere(self.blockStarts>endTime).min()-1
-        toRead = (startBlock-endBlock)+1
-        spec = np.zeros((0,self.nChan),dtype=complex)
-        times = Time(np.zeros(0)*u.s,format='unix')
+    def read_blocks_containing(self,startTime,endTime,gapFill=False,fill_value=np.nan):
+        startBlock = max(np.argwhere(self.blockStarts>startTime.unix*u.s-2*self.frameSec).min()-1,0)
+        endBlock = np.argwhere(self.blockStarts>endTime.unix*u.s+2*self.frameSec).min()
+        toRead = max((endBlock-startBlock),1)
+        t0 = self.blockStarts[startBlock]
+        tf = self.blockStarts[startBlock+toRead-1]+self.frameSec*self.blockFrame
+        nf = int(np.round(((tf-t0)/self.frameSec).to_value(u.dimensionless_unscaled)))+1
+
+        spec = np.zeros((nf,self.nChan),dtype=complex)
+        times = Time(np.zeros(nf)*u.s,format='unix')
         for i in range(toRead):
-            specNew,timesNew,success = self._read_block(startBlock+i)
-            if gapFill:
-                jump = np.round(((timesNew[0]-times[-1])/self.frameSec).to(u.dimensionless_unscaled))
-                if jump>1:
-                    times = np.concatenate((times,
-                                            times[-1]+np.linspace(1,jump-1,jump-1)*self.frameSec),
-                                            axis=0)
-                    spec = np.concatenate((spec,np.zeros((jump-1,self.nChan),dtype=complex)*(np.nan+1j*np.nan)),axis=0)
-                times = np.concatenate((times,timesNew),axis=0)
-                spec = np.concatenate((spec,specNew),axis=0)
-            else:
-                times = np.concatenate((times,timesNew),axis=0)
-                spec = np.concatenate((spec,specNew),axis=0)
-        return(spec,times)
+            specNew,timesNew = self._read_block(startBlock+i)
+            # if gapFill and i>0:
+            #     jump = int(np.round(((timesNew[0]-times[-1])/self.frameSec).to(u.dimensionless_unscaled)))
+            #     if jump>1:
+            #         times = np.concatenate((times,
+            #                                 times[-1]+np.linspace(1,jump-1,jump-1)*self.frameSec),
+            #                                 axis=0)
+            #         spec = np.concatenate((spec,np.ones((jump-1,self.nChan),dtype=complex)*fill_value),axis=0)
+            #     times = np.concatenate((times,timesNew),axis=0)
+            #     spec = np.concatenate((spec,specNew),axis=0)
+            # else:
+            #     times = np.concatenate((times,timesNew),axis=0)
+            #     spec = np.concatenate((spec,specNew),axis=0)
+            tb = self.blockStarts[startBlock+i]
+            id0 = int(np.round(((tb-t0)/self.frameSec).to_value(u.dimensionless_unscaled)))
+            spec[id0:id0+specNew.shape[0]]=specNew
+            times[id0:id0+specNew.shape[0]] = Time(tb,format='unix')+np.linspace(0,specNew.shape[0]-1,specNew.shape[0])*self.frameSec
+        mask = (times>startTime-2*self.frameSec)*(times<endTime+2*self.frameSec)
+        return(spec[mask],times[mask])
             
     @classmethod
     def from_pickle(cls,file,**kwargs):
