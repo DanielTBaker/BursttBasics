@@ -65,3 +65,4 @@ NN = yLocalN
 EN = xLocalN
 LTNCenter = offset_location(LTNGNSS,NN,EN,zLocalN)
 
+GRNCenter = LTNCenter
