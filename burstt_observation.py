@@ -263,7 +263,7 @@ class Observation:
                          predictDelays = False
                         ):
         correlationStreamNames = np.array(self.config['Correlating'].get('streams').split(','))
-        correlationStreams = []
+        correlationStreams : list[Baseband] = []
         for name in correlationStreamNames:
             for i in range(self.streamNames.shape[0]):
                 if self.streamNames[i]==name:
@@ -272,6 +272,18 @@ class Observation:
         ToAs = correlationStreams[0].ToAs
         ToAs = ToAs[(Time(ToAs,format='unix')-self.pulseWidth).mjd>self.earliest]
         ToAs = ToAs[(Time(ToAs,format='unix')+self.pulseWidth).mjd<self.latest]
+        dataExists = np.ones(ToAs.shape[0],dtype=bool)
+        if self.verbose:
+            print(f'Prefiltered ToA: {ToAs.shape[0]}')
+        for i in range(ToAs.shape[0]):
+            # print('----')
+            # print(Time(ToAs[i],format='unix').isot)
+            for stream in correlationStreams:
+                dataExists[i]*=stream.check_data_window(self.polyCoFreq,Time(ToAs[i],format='unix'),self.pulseWidth)
+            # print(dataExists[i])
+        ToAs = ToAs[dataExists]
+        if self.verbose:
+            print(f'Filtered ToA: {ToAs.shape[0]}')
         if predictDelays:
             predictedDelays = np.round((self.predict_delay(Time(ToAs,format='unix'),correlationStations)/self.streams[0].frameSec).to_value(u.dimensionless_unscaled)).astype(int)
         else:

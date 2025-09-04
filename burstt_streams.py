@@ -599,6 +599,30 @@ class Baseband(Stream):
                 wts[order*self.nChan+i,:],__ = np.histogram(phases[np.isfinite(column)],bins=np.linspace(-.5,.5,nBins+1))
         return(folded,wts)
 
+    def check_data_window(self,fref,tCent,tWidth,dedisperse =True):
+        ## Convert reference time to unix
+        if isinstance(tCent,Time):
+            tRef = tCent
+        else:
+            tRef = self.epoch0 + tCent
+        tEnd = tRef + tWidth
+        tStart = tRef - tWidth
+        ## Calculate dispersion delay for each frequency
+        try:
+            dispersionDelay = ((self.DM/K)*(1/self.freq**2 - 1/fref**2)).to(u.s)
+        except:
+            dispersionDelay = np.zeros(self.freq.shape[0])*u.s
+        ## Calculate number of frames in final spectrum
+        nFrames = self.time_to_frames(2*tWidth)
+    
+        ## Find start and end at each frequency
+        tStartDispersed = tStart+dispersionDelay
+        tEndDispersed = tEnd+dispersionDelay
+        exists = True
+        for order in range(self.nOrder):
+            exists*=self.rings[order].check_data_window(tStartDispersed[self.nChan*(order+1)-1],tEndDispersed[self.nChan*order])
+        return(exists)
+
     def read_around_dedis(self,fref,tCent,tWidth,coherent = True):
         """Read and dedisperse all subands to cover a given time range at the reference frequency
 
@@ -643,7 +667,67 @@ class Baseband(Stream):
             return(spec,tStart)
         except Exception as e:
             print(f'In read_around_dedis({sys.exc_info()[2].tb_lineno}): {e}')
+            print(f'Order:{order}')
+            print(f'tStart: {tStartDispersed[self.nChan*(order+1)-1].isot}' )
+            print(f'({tStartDispersed[self.nChan*(order+1)-1].unix})' )
+            print(f'tEnd: {tEndDispersed[self.nChan*(order+1)-1].isot}' )
+            print(f'({tEndDispersed[self.nChan*(order+1)-1].unix})')
+            print(f'nTimes: {timeTemp.shape[0]}')
+            print(f'Spec Shape: {specTemp.shape[0]}')
+            time.sleep(3600)
             return(spec*np.nan,tStart)
+
+    def _pulsar_prep(self,config):
+        self.ToAs = []
+        self.pulseWidth = self.sourcePars.getfloat('pulseWidth')*u.ms
+
+        self.polyCoFreq = self.sourcePars.getfloat('polyCoFreq')*u.MHz
+        self.parFile = self.sourcePars.get('parFile')
+        self.ToAFile = config[self.name].get('ToAFile',
+                                           os.path.join(self.dateDir,
+                                                        f'ToAs_{self.obsDate}_{self.sourceName}_{self.name}.npy'))
+        self.profileFile = config[self.name].get('profile',os.path.join(self.dateDir,
+                                                        f'profile_{self.obsDate}_{self.sourceName}_{self.name}.npy'))
+        self.polycoFile = os.path.join(self.dateDir,
+                                       f'polyco_{self.obsDate}_{self.sourceName}_{self.name}.dat')
+        if os.path.exists(self.polycoFile):
+            self.polyco = Polycos.read(self.polycoFile)
+        else:
+            fushanObs = TopoObs(self.station, location = globals()[f'{self.station}Center'],origin='/home/dbaker/BursttBasics',overwrite=True)
+            if self.verbose:
+                print('Prep PolyCos')
+            model = get_model(self.parFile)
+            self.polyco = Polycos.generate_polycos(model,
+                                              np.floor(Time(min([ring.blockStarts.min().value for ring in self.rings]),format='unix').mjd),
+                                              np.ceil(Time(max([ring.blockStarts.max().value for ring in self.rings]),format='unix').mjd + self.frameSec.to_value(u.day)*self.blockFrame)+1,
+                                              self.station,
+                                              144, 12,
+                                              self.polyCoFreq.value,progress=True)
+            self.polyco.write_polyco_file(self.polycoFile)
+        self.ToA_check() 
+
+    def ToAs_from_pref(self,phaseRef):
+        t = Time(min([ring.blockStarts.min().value for ring in self.rings]),format='unix').mjd+self.pulseWidth.to_value(u.day)
+        phase = self.polyco.eval_phase(t)[0].value
+        p = (1./(self.polyco.eval_spin_freq(t)[0]*u.Hz)).to_value(u.day)
+        if phase>phaseRef:
+            t = t + p*(1-phase)
+        while np.abs(phase - phaseRef)>1e-7:
+            p = (1./(self.polyco.eval_spin_freq(t)[0]*u.Hz)).to_value(u.day)
+            t += p*(phaseRef-phase)
+            phase = self.polyco.eval_phase(t)[0].value
+        self.ToAs = []
+        while t + self.pulseWidth.to_value(u.day) < Time(max([ring.blockStarts.max().value for ring in self.rings]),format='unix').mjd + self.frameSec.to_value(u.day)*self.blockFrame:
+            self.ToAs.append(t)
+            p = p = (1./(self.polyco.eval_spin_freq(t)[0]*u.Hz)).to_value(u.day)
+            t += p
+            phase = self.polyco.eval_phase(t)[0].value
+            while np.abs(phase - phaseRef)>1e-7:
+                p = p = (1./(self.polyco.eval_spin_freq(t)[0]*u.Hz)).to_value(u.day)
+                t += p*(phaseRef-phase)
+                phase = self.polyco.eval_phase(t)[0].value
+        self.ToAs = Time(np.array(self.ToAs),format='mjd').unix
+        np.save(self.ToAFile,self.ToAs)
 
 class Intensity(Stream):
     """
@@ -907,7 +991,7 @@ class Ring:
 
     def _block_starts(self):
         nFiles = len(self.fileList)
-        self.blockStarts = np.zeros(nFiles*self.nBlock)*np.nan*u.s
+        self.blockStarts = np.zeros(nFiles*self.nBlock)*np.inf*u.s
         self.blockFileID = np.linspace(0,nFiles-1,nFiles).repeat(self.nBlock).astype(int)
         self.blockID = np.tile(np.linspace(0,self.nBlock-1,self.nBlock),nFiles).astype(int)
         for fileID,file in enumerate(self.fileList):
@@ -921,14 +1005,18 @@ class Ring:
                         ep = tmp[2]*u.s + 2*u.s + (tmp[0]/2)*self.frameSec
                         self.blockStarts[fileID*self.nBlock+b]=ep
                     except:
-                        break
+                        pass
         order = np.argsort(self.blockStarts)
         self.blockStarts = self.blockStarts[order]
         self.blockFileID = self.blockFileID[order]
         self.blockID = self.blockID[order]
+        self.totalBlocks = self.blockStarts[np.isfinite(self.blockStarts)].shape[0]
+        self.blockStarts = self.blockStarts[:self.totalBlocks]
+        self.blockFileID = self.blockFileID[:self.totalBlocks]
+        self.blockID = self.blockID[:self.totalBlocks]
         self.earliest = np.nanmin(self.blockStarts)
         self.latest = np.nanmax(self.blockStarts)+np.nanmedian(np.diff(self.blockStarts))
-        self.totalBlocks = self.blockStarts[np.isfinite(self.blockStarts)].shape[0]
+        
         
     def _read_block(self,blockID):
         readFile = self.fileList[self.blockFileID[blockID]]
@@ -951,35 +1039,68 @@ class Ring:
         return(spec,times)
     
     def read_blocks_containing(self,startTime,endTime,gapFill=False,fill_value=np.nan):
-        startBlock = max(np.argwhere(self.blockStarts>startTime.unix*u.s-2*self.frameSec).min()-1,0)
-        endBlock = np.argwhere(self.blockStarts>endTime.unix*u.s+2*self.frameSec).min()
-        toRead = max((endBlock-startBlock),1)
-        t0 = self.blockStarts[startBlock]
-        tf = self.blockStarts[startBlock+toRead-1]+self.frameSec*self.blockFrame
+        endUnix = (endTime+2*self.frameSec).unix*u.s
+        startUnix = (startTime-2*self.frameSec).unix*u.s
+        startBlock = np.argwhere(self.blockStarts<startUnix).max()
+        endBlock = np.argwhere((self.blockStarts+self.frameSec*self.blockFrame)>endUnix).min()
+        toRead = endBlock-startBlock + 1
+        t0 = Time(self.blockStarts[startBlock],format='unix')
+        tf = Time(self.blockStarts[startBlock+toRead-1]+self.frameSec*self.blockFrame,format='unix')
+        while t0+self.frameSec*self.blockFrame < startTime-2*self.frameSec:
+            startBlock+=1
+            toRead -=1
+            if toRead <=0 or startBlock>=self.totalBlocks:
+                nf = int(np.round(((endTime-startTime)/self.frameSec).to_value(u.dimensionless_unscaled)))+5
+                times = startTime+np.linspace(0,nf-1,nf)*self.frameSec
+                spec = np.zeros((nf,self.nChan),dtype=complex)
+                return(spec,times)
+            t0 = Time(self.blockStarts[startBlock],format='unix')
+        while self.blockStarts[startBlock+toRead-1] > endUnix:
+            toRead -=1
+            if toRead <=0 or startBlock>=self.totalBlocks:
+                nf = int(np.round(((endTime-startTime)/self.frameSec).to_value(u.dimensionless_unscaled)))+5
+                times = startTime+np.linspace(0,nf-1,nf)*self.frameSec
+                spec = np.zeros((nf,self.nChan),dtype=complex)
+                return(spec,times)
+            tf = Time(self.blockStarts[startBlock+toRead-1]+self.frameSec*self.blockFrame,format='unix')
+            
         nf = int(np.round(((tf-t0)/self.frameSec).to_value(u.dimensionless_unscaled)))+1
 
-        spec = np.zeros((nf,self.nChan),dtype=complex)
-        times = Time(np.zeros(nf)*u.s,format='unix')
+        spec = np.zeros((nf,self.nChan),dtype=complex)*fill_value
+        times = t0 + np.linspace(0,nf-1,nf)*self.frameSec
         for i in range(toRead):
             specNew,timesNew = self._read_block(startBlock+i)
-            # if gapFill and i>0:
-            #     jump = int(np.round(((timesNew[0]-times[-1])/self.frameSec).to(u.dimensionless_unscaled)))
-            #     if jump>1:
-            #         times = np.concatenate((times,
-            #                                 times[-1]+np.linspace(1,jump-1,jump-1)*self.frameSec),
-            #                                 axis=0)
-            #         spec = np.concatenate((spec,np.ones((jump-1,self.nChan),dtype=complex)*fill_value),axis=0)
-            #     times = np.concatenate((times,timesNew),axis=0)
-            #     spec = np.concatenate((spec,specNew),axis=0)
-            # else:
-            #     times = np.concatenate((times,timesNew),axis=0)
-            #     spec = np.concatenate((spec,specNew),axis=0)
-            tb = self.blockStarts[startBlock+i]
+            tb = Time(self.blockStarts[startBlock+i],format='unix')
             id0 = int(np.round(((tb-t0)/self.frameSec).to_value(u.dimensionless_unscaled)))
             spec[id0:id0+specNew.shape[0]]=specNew
-            times[id0:id0+specNew.shape[0]] = Time(tb,format='unix')+np.linspace(0,specNew.shape[0]-1,specNew.shape[0])*self.frameSec
         mask = (times>startTime-2*self.frameSec)*(times<endTime+2*self.frameSec)
         return(spec[mask],times[mask])
+    
+    def check_data_window(self,startTime,endTime):
+        endUnix = (endTime+2*self.frameSec).unix*u.s
+        startUnix = (startTime-2*self.frameSec).unix*u.s
+        preblocks = np.argwhere(self.blockStarts<startUnix)
+        if preblocks.shape[0] == 0:
+            return(False)
+        startBlock = preblocks.max()
+        postblocks = np.argwhere((self.blockStarts+self.frameSec*self.blockFrame)>endUnix)
+        if postblocks.shape[0] == 0:
+            return(False)
+        endBlock = postblocks.min()
+        toRead = endBlock-startBlock + 1
+        t0 = Time(self.blockStarts[startBlock],format='unix')
+        while t0+self.frameSec*self.blockFrame < startTime-2*self.frameSec:
+            startBlock+=1
+            toRead -=1
+            if toRead <=0 or startBlock>=self.totalBlocks:
+                return(False)
+            t0 = Time(self.blockStarts[startBlock],format='unix')
+        while self.blockStarts[startBlock+toRead-1] > endUnix:
+            toRead -=1
+            if toRead <=0 or startBlock>=self.totalBlocks:
+                return(False)
+        return(True)
+        
             
     @classmethod
     def from_pickle(cls,file,**kwargs):
