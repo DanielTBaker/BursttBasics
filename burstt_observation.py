@@ -267,7 +267,10 @@ class Observation:
                 if self.streamNames[i]==name:
                     correlationStreams.append(self.streams[i])
         correlationStations = [stream.station for stream in correlationStreams]
-        ToAs = correlationStreams[0].ToAs
+        ToAs = np.copy(correlationStreams[0].ToAs)
+        for stream in correlationStreams:
+            maxDispdelay = ((stream.DM/K)*(1/(stream.freq.min()**2)-1/(self.polyCoFreq**2))).to(u.s)
+            ToAs = ToAs[(ToAs*u.s>stream.earliest+self.pulseWidth)*(ToAs*u.s<stream.latest-self.pulseWidth-maxDispdelay)]
         if predictDelays:
             predictedDelays = np.round((self.predict_delay(Time(ToAs,format='unix'),correlationStations)/self.streams[0].frameSec).to_value(u.dimensionless_unscaled)).astype(int)
         else:
@@ -304,7 +307,7 @@ class Observation:
                     I = results[1]
                     var = results[2]
                 else:
-                    for obsID in range(len(self.streams)):
+                    for obsID in range(len(correlationStreams)):
                         I[obsID] += results[1][obsID]
                         var[obsID] += results[2][obsID]
             if self.verbose:
@@ -421,8 +424,8 @@ class Observation:
                                                   self.config["Correlating"].getboolean("dmPhase",False)])
                 print(f'Correlations Complete at {(Time.now()-gs).to_value(u.min):.1f} minutes',flush=True)
                 pairID = 0 
-                for specID0 in range(len(self.streams)-1):
-                    for deltaID1 in range(len(self.streams)-specID0-1):
+                for specID0 in range(len(correlationStreams)-1):
+                    for deltaID1 in range(len(correlationStreams)-specID0-1):
                         specID1 = specID0+deltaID1+1
                         fname = f'BURSTT_{self.sourceName}_{self.obsDate}_{groupID}_{correlationStreams[specID0].name}_{correlationStreams[specID1].name}_{self.config["Correlating"].get("dedisperse")}'
                         if self.config["Correlating"].getboolean("dmSearch",False):

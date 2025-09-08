@@ -638,6 +638,8 @@ class Baseband(Stream):
                     fh.close()
             np.save(self.blockStartFile,self.blockStart.value)
         self.nEpochs = int(self.blockStart.shape[0]//self.nOrder)
+        self.earliest = np.nanmin(self.blockStart)
+        self.latest = np.nanmax(self.blockStart)+self.frameSec*(self.blockFrame-1)
 
     def load_chain(self,order,segment,verbose=False):
         files = self.fbystamp[self.nEpochs*order+segment[0]]
