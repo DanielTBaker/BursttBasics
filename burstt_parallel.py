@@ -139,6 +139,8 @@ class SinglePulseProcess(Process):
                         j = i - nSearch//2 +predictedDelays[baseID]
                         ## Cutout and normalize shifted spec1
                         spec1_sel = self.specs[specID1][peakPx-width+j:peakPx+width+j][:,fOverlap1][:,:640]
+                        if not spec1_sel.shape[0]==spec0_con.shape[0]:
+                            continue
                         ## Correlate
                         cross2D = spec1_sel * spec0_con
                         cross2D /= np.ma.abs(spec1_sel)
