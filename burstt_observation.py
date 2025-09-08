@@ -285,8 +285,10 @@ class Observation:
             p.start()
             p.give_obs(correlationStreams)
             p.front_pipe.recv()
-            
+        skips = self.config['Correlating'].getint('skip',0)
         for groupID in range(groups):
+            if groupID<skips:
+                continue
             if self.verbose:
                 print(f'Start group {groupID}')
             gs = Time.now()
