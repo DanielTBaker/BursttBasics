@@ -1,8 +1,8 @@
-from packet_func import *
-from burstt_const import *
-from burstt_func import *
-from burstt_parallel import *
-from burstt_streams import *
+from ..packet_func import *
+from ..burstt_const import *
+from ..burstt_func import *
+from .parallel import *
+from .streams import *
 
 import configparser
 import sys
@@ -96,6 +96,8 @@ class Observation:
                         self.streams[streamID].profilePhases = np.linspace(-.5,.5,self.streams[streamID].profile.shape[1]+1)
                         self.streams[streamID].profilePhases = (self.streams[streamID].profilePhases[1:]+self.streams[streamID].profilePhases[:-1])/2
                         self.streams[streamID].ToAs_from_prof()
+            if self.taskPars.getboolean('SNR',False):
+                self.pulse_SN(self.config['SN'].getint('nPool'))
             if self.taskPars.getboolean('correlate',False) or self.taskPars.getboolean('makeIntensities',False):
                 self.pulsar_correlate(corrWidth = int(self.config['Correlating'].getfloat('corrFrames',200)),
                                      nSearch = int(self.config['Correlating'].getfloat('nSearch',200)),
@@ -104,6 +106,7 @@ class Observation:
                                      nCorr = int(self.config['Correlating'].getfloat('nCorr',40)),
                                      saveCuts = self.config['Correlating'].getboolean('savecuts',False),
                                      predictDelays = self.config['Correlating'].getboolean('predictDelay',False),
+                                     useClock = self.config['Correlating'].getboolean('useClock',False)
                                     )
             if self.taskPars.getboolean('formDspec',False):
                 self.make_dspec(intBlocks=self.config['Dspec'].getint('intBlocks'),
@@ -232,7 +235,8 @@ class Observation:
 
     def predict_delay(self,times,stationNames):
         if self.sourceType =='pulsar':
-            srce = SkyCoord.from_name('PSR '+self.sourceName)
+            model = get_model(self.streams[0].parFile)
+            srce = model.as_ICRS(Time(self.streams[0].ToAs.mean(),format='unix')).coords_as_ICRS()
         else:
             srce = SkyCoord.from_name(self.sourceName)
         srce = SkyCoord(ra=[srce.ra],dec=[srce.dec])
@@ -258,7 +262,8 @@ class Observation:
                          nPool = 80,
                          nCorr = 40,
                          saveCuts = False,
-                         predictDelays = False
+                         predictDelays = False,
+                         useClock = False,
                         ):
         correlationStreamNames = np.array(self.config['Correlating'].get('streams').split(','))
         correlationStreams = []
@@ -272,9 +277,19 @@ class Observation:
             maxDispdelay = ((stream.DM/K)*(1/(stream.freq.min()**2)-1/(self.polyCoFreq**2))).to(u.s)
             ToAs = ToAs[(ToAs*u.s>stream.earliest+self.pulseWidth)*(ToAs*u.s<stream.latest-self.pulseWidth-maxDispdelay)]
         if predictDelays:
-            predictedDelays = np.round((self.predict_delay(Time(ToAs,format='unix'),correlationStations)/self.streams[0].frameSec).to_value(u.dimensionless_unscaled)).astype(int)
+            predictedDelays = (self.predict_delay(Time(ToAs,format='unix'),correlationStations)/self.streams[0].frameSec).to_value(u.dimensionless_unscaled)
         else:
-            predictedDelays = np.zeros((self.nBaselines,ToAs.shape[0]),dtype=int)
+            predictedDelays = np.zeros((self.nBaselines,ToAs.shape[0]))
+        if useClock:
+            try:
+                clock = (self.get_clock_correction(Time(ToAs,format='unix'))/self.streams[0].frameSec).to_value(u.dimensionless_unscaled)
+                predictedDelays += clock
+            except Exception as e:
+                if self.verbose:
+                    print('No PPP available')
+                    print(e)
+                    print(clock[0],predictedDelays[0])
+        predictedDelays = np.round(predictedDelays).astype(int)
         groups = int(ToAs.shape[0]//nPool) +1
         procs = []
         if self.verbose:
@@ -364,11 +379,17 @@ class Observation:
                     A0 = y.max()-C0
                     x0 = plotTime[y==y.max()].mean().to_value(u.us)
                     s0 = plotTime.max().to_value(u.us)/10
-                    poptT,pcovT = curve_fit(gau1,plotTime.to_value(u.us),y,p0=[A0,x0,s0,C0])
+                    try:
+                        poptT,pcovT = curve_fit(gau1,plotTime.to_value(u.us),y,p0=[A0,x0,s0,C0])
+                    except:
+                        poptT = np.array([A0,plotTime.mean().to_value(u.us),s0,C0])
                     tProf = gau1(plotTime.to_value(u.us),*poptT[:-1],0)
                     y2=((I[streamID]-poptT[-1])*tProf[:,np.newaxis]).sum(0)/np.sum(tProf)
                     p0 = [y2[0]/np.power(stream.freq[0].to_value(u.MHz),-2),-2]
-                    poptF,pcovF = curve_fit(power,np.reshape(stream.freq,(I[streamID].shape[1],-1)).mean(1)[:25].to_value(u.MHz),y2[:25],p0=p0,maxfev=10000)
+                    try:
+                        poptF,pcovF = curve_fit(power,np.reshape(stream.freq,(I[streamID].shape[1],-1)).mean(1)[:25].to_value(u.MHz),y2[:25],p0=p0,maxfev=10000)
+                    except:
+                        poptF = p0
                     model = power(np.reshape(stream.freq,(I[streamID].shape[1],-1)).mean(1)[:25].to_value(u.MHz),*poptF)[:,np.newaxis]*tProf
                     plt.figure(figsize=(6,6))
                     plt.subplot(grid[:3,:3])
@@ -397,7 +418,8 @@ class Observation:
                                     nSearch,predictedDelays[:,procID+groupStart],
                                     self.config["Correlating"].getboolean("dmSearch",False),
                                     self.polyCoFreq,
-                                    self.config["Correlating"].getboolean("dmPhase",False)
+                                    self.config["Correlating"].getboolean("dmPhase",False),
+                                    self.config["Correlating"].getint("size",2048)
                                    ])
                 print(f'Correlations Started at {(Time.now()-gs).to_value(u.min):.1f} minutes',flush=True)
                 for i,p in enumerate(procs[:groupSize]):
@@ -434,6 +456,7 @@ class Observation:
                             fname+='_dmS'
                         if self.config["Correlating"].getboolean("dmPhase",False):
                             fname+='_dmP'
+                        fname+=f"_{self.config['Correlating'].getint('size',2048)}"
                         fname+='_corr.npz'
                         np.savez(os.path.join(self.correlationDir,fname),
                                  corr=corrs[pairID],
@@ -451,7 +474,7 @@ class Observation:
                         doFFT=True,
                         predictDelays = True):
         nCents = int(((self.latest-self.earliest)*u.day-chunkWidth/5.).to_value(u.s)//chunkWidth.to_value(u.s))
-        tCents = (np.linspace(0,nCents-1,nCents)+.1)*chunkWidth + self.earliest*u.day+chunkWidth/2
+        tCents = (np.linspace(0,nCents-1,nCents))*chunkWidth + self.earliest*u.day+chunkWidth/2
         tCents = Time(tCents.to_value(u.day),format='mjd')
         for i in range(len(self.streams)):
             print(self.streamNames[i]+':')
@@ -514,7 +537,7 @@ class Observation:
             I = [x/groupSize for x in I]
             Imeds = [x.mean(0) for x in I]
             for streamID in range(len(correlationStreams)):
-                var[streamID]/=Imeds[streamID]
+                var[streamID]/=Imeds[streamID]**2
             var2 = [sigma_clip(x, sigma=2.0) for x in var]
             masks = [x.mask for x in var2]
             for streamID in range(len(correlationStreams)):
@@ -549,10 +572,10 @@ class Observation:
                 plt.savefig(os.path.join(self.plotDir,f'BURSTT_{self.sourceName}_{self.obsDate}_{groupID}_{stream.name}_I.png'))
                 # np.savez(os.path.join(self.intensityDir,f'BURSTT_{self.sourceName}_{self.obsDate}_{groupID}_{station.station}_I_{self.ddis}.npz'),I=I[stationID],f=station.freq,t=plotTime)
             if doCorr:
-                for procID,proc in enumerate(procs[:40]):
-                    proc.correlate([masks,2*maxShift,doFFT,predictedDelays[:,procID+groupStart]])
+                for procID,proc in enumerate(procs[:min(40,groupSize)]):
+                    proc.correlate([masks,2*maxShift,doFFT,predictedDelays[:,procID+groupStart,Imeds]])
                 print(f'Correlations Started at {(Time.now()-gs).to_value(u.min):.1f} minutes',flush=True)
-                for i,p in enumerate(procs):
+                for i,p in enumerate(procs[:groupSize]):
                     results = p.front_pipe.recv()
                     if i == 0:
                         corrs = results[1]
@@ -565,7 +588,7 @@ class Observation:
                             else:
                                 corrs[pairID] = np.concatenate([corrs[pairID],results[1][pairID][np.newaxis,:,:]],axis=0)
                                 offsets[pairID] = np.concatenate([offsets[pairID],results[2][pairID][np.newaxis,:]],axis=0)
-                    if i+40<len(procs):
+                    if i+40<groupSize:
                         procs[i+40].correlate([masks,2*maxShift,doFFT,predictedDelays[:,i+40+groupStart]])
                 print(f'Correlations Complete at {(Time.now()-gs).to_value(u.min):.1f} minutes',flush=True)
                 pairID = 0 
@@ -582,7 +605,7 @@ class Observation:
             proc.stop()
 
 
-    def get_clock_correction(self,times):
+    def get_clock_correction(self,times,station0='FUS',station1='LTN'):
         pppBaseDir = '/burstt_home/shared/gnss/ppp'
 
         hasFirst=False
@@ -593,55 +616,55 @@ class Observation:
             dayOfYear=int((times[0]+deltaDay*u.day-Time(f'{year}-01-01T00:00:00')).to_value(u.day))+1
             print(f'Year: {year}')
             print(f'Day: {dayOfYear}')
-            pppFUSDir = f'FUS-{year}-{dayOfYear}-full_output'
-            pppLTNDir = f'LTN-{year}-{dayOfYear}-full_output'
+            ppp0Dir = f'{station0}-{year}-{dayOfYear}-full_output'
+            ppp1Dir = f'{station1}-{year}-{dayOfYear}-full_output'
             try:
-                pppLTNFile = [f for f in os.listdir(os.path.join(pppBaseDir,pppLTNDir)) if f[-3:]=='csv'][0]
-                pppFUSFile = [f for f in os.listdir(os.path.join(pppBaseDir,pppFUSDir)) if f[-3:]=='csv'][0]
+                ppp1File = [f for f in os.listdir(os.path.join(pppBaseDir,ppp1Dir)) if f[-3:]=='csv'][0]
+                ppp0File = [f for f in os.listdir(os.path.join(pppBaseDir,ppp0Dir)) if f[-3:]=='csv'][0]
             except Exception as e:
                 print(e)
                 continue
             
-            FUS_ppp = np.genfromtxt(os.path.join(pppBaseDir,pppFUSDir,pppFUSFile),delimiter = ',')[1:]
-            LTN_ppp = np.genfromtxt(os.path.join(pppBaseDir,pppLTNDir,pppLTNFile),delimiter = ',')[1:]
+            ppp0 = np.genfromtxt(os.path.join(pppBaseDir,ppp0Dir,ppp0File),delimiter = ',')[1:]
+            ppp1 = np.genfromtxt(os.path.join(pppBaseDir,ppp1Dir,ppp1File),delimiter = ',')[1:]
 
             if hasFirst:
-                FUS_year = FUS_ppp[:,-2]
-                FUS_day = FUS_ppp[:,-3]
-                FUS_hour = FUS_ppp[:,-4]
-                FUS_clockNew = FUS_ppp[:,-1]*u.ns
-                LTN_year = LTN_ppp[:,-2]
-                LTN_day = LTN_ppp[:,-3]
-                LTN_hour = LTN_ppp[:,-4]
-                LTN_clockNew = LTN_ppp[:,-1]*u.ns
-                FUSpppTimeNew = Time(np.array([f'{int(x)}-01-01T00:00:00' for x in FUS_year]))+(FUS_day-1)*u.day+FUS_hour*u.hour
-                LTNpppTimeNew = Time(np.array([f'{int(x)}-01-01T00:00:00' for x in LTN_year]))+(LTN_day-1)*u.day+LTN_hour*u.hour
-                LTN_clock = np.concatenate((LTN_clock,LTN_clockNew[LTNpppTimeNew.mjd>LTNpppTime.mjd.max()]))
-                FUS_clock = np.concatenate((FUS_clock,FUS_clockNew[FUSpppTimeNew.mjd>FUSpppTime.mjd.max()]))
-                LTNpppTime = Time(np.concatenate((LTNpppTime.mjd,LTNpppTimeNew[LTNpppTimeNew.mjd>LTNpppTime.mjd.max()].mjd)),format='mjd')
-                FUSpppTime = Time(np.concatenate((FUSpppTime.mjd,FUSpppTimeNew[FUSpppTimeNew.mjd>FUSpppTime.mjd.max()].mjd)),format='mjd')
+                year0 = ppp0[:,-2]
+                day0 = ppp0[:,-3]
+                hour0 = ppp0[:,-4]
+                clock0New = ppp0[:,-1]*u.ns
+                year1 = ppp1[:,-2]
+                day1 = ppp1[:,-3]
+                hour1 = ppp1[:,-4]
+                clock1New = ppp1[:,-1]*u.ns
+                ppp0TimeNew = Time(np.array([f'{int(x)}-01-01T00:00:00' for x in year0]))+(day0-1)*u.day+hour0*u.hour
+                ppp1TimeNew = Time(np.array([f'{int(x)}-01-01T00:00:00' for x in year1]))+(day1-1)*u.day+hour1*u.hour
+                clock1 = np.concatenate((clock1,clock1New[ppp1TimeNew.mjd>ppp1Time.mjd.max()]))
+                clock0 = np.concatenate((clock0,clock0New[ppp0TimeNew.mjd>ppp0Time.mjd.max()]))
+                ppp1Time = Time(np.concatenate((ppp1Time.mjd,ppp1TimeNew[ppp1TimeNew.mjd>ppp1Time.mjd.max()].mjd)),format='mjd')
+                ppp0Time = Time(np.concatenate((ppp0Time.mjd,ppp0TimeNew[ppp0TimeNew.mjd>ppp0Time.mjd.max()].mjd)),format='mjd')
 
             else:
-                FUS_year = FUS_ppp[:,-2]
-                FUS_day = FUS_ppp[:,-3]
-                FUS_hour = FUS_ppp[:,-4]
-                FUS_clock = FUS_ppp[:,-1]*u.ns
-                LTN_year = LTN_ppp[:,-2]
-                LTN_day = LTN_ppp[:,-3]
-                LTN_hour = LTN_ppp[:,-4]
-                LTN_clock = LTN_ppp[:,-1]*u.ns
-                FUSpppTime = Time(np.array([f'{int(x)}-01-01T00:00:00' for x in FUS_year]))+(FUS_day-1)*u.day+FUS_hour*u.hour
-                LTNpppTime = Time(np.array([f'{int(x)}-01-01T00:00:00' for x in LTN_year]))+(LTN_day-1)*u.day+LTN_hour*u.hour
+                year0 = ppp0[:,-2]
+                day0 = ppp0[:,-3]
+                hour0 = ppp0[:,-4]
+                clock0 = ppp0[:,-1]*u.ns
+                year1 = ppp1[:,-2]
+                day1 = ppp1[:,-3]
+                hour1 = ppp1[:,-4]
+                clock1 = ppp1[:,-1]*u.ns
+                ppp0Time = Time(np.array([f'{int(x)}-01-01T00:00:00' for x in year0]))+(day0-1)*u.day+hour0*u.hour
+                ppp1Time = Time(np.array([f'{int(x)}-01-01T00:00:00' for x in year1]))+(day1-1)*u.day+hour1*u.hour
                 hasFirst=True
 
 
         # FUS_clock-=FUS_clock.mean()
         # LTN_clock-=LTN_clock.mean()
 
-        FUS_interp = interp1d(FUSpppTime.mjd,FUS_clock.to_value(u.us))
-        LTN_interp = interp1d(LTNpppTime.mjd,LTN_clock.to_value(u.us))
+        interp0 = interp1d(ppp0Time.mjd,clock0.to_value(u.us))
+        interp1 = interp1d(ppp1Time.mjd,clock1.to_value(u.us))
 
-        clockCorr = LTN_interp(times.mjd+(18*u.s).to_value(u.day))*u.us - FUS_interp(times.mjd+(18*u.s).to_value(u.day))*u.us
+        clockCorr = interp1(times.mjd+(18*u.s).to_value(u.day))*u.us - interp0(times.mjd+(18*u.s).to_value(u.day))*u.us
         return(clockCorr)
 
     def plot_shifts(self,suffix,rolledDelays,fullToAs,fullArr,shiftedDelays,shiftedArr,peakOffset):
@@ -884,3 +907,56 @@ class Observation:
         plt.tight_layout()
         plt.savefig(os.path.join(self.plotDir,f'BURSTT_{self.sourceName}_{self.obsDate}_rawshifts_residuals.png'))
         plt.close()
+
+    def pulse_SN(self,nPool = 80):
+        if self.verbose:
+            print('Start SNR Measurements')
+        SNStreamNames = np.array(self.config['SN'].get('streams').split(','))
+        SNStreams = []
+        for name in SNStreamNames:
+            for i in range(self.streamNames.shape[0]):
+                if self.streamNames[i]==name:
+                    SNStreams.append(self.streams[i])
+        for stream in SNStreams:
+            stream.read_profile_file()
+            stream.get_flat_profile()
+        correlationStations = [stream.station for stream in SNStreams]
+        ToAs = np.copy(SNStreams[0].ToAs)
+        for stream in SNStreams:
+            maxDispdelay = ((stream.DM/K)*(1/(stream.freq.min()**2)-1/(self.polyCoFreq**2))).to(u.s)
+            ToAs = ToAs[(ToAs*u.s>stream.earliest+self.pulseWidth)*(ToAs*u.s<stream.latest-self.pulseWidth-maxDispdelay)]
+        groups = int(ToAs.shape[0]//nPool) +1
+        procs = []
+        if self.verbose:
+            print('Building Proccesses')
+        for i in range(nPool):
+            procs.append(SinglePulseProcess(i,self.verbose))
+        for p in procs:
+            p.start()
+            p.give_obs(SNStreams)
+            p.front_pipe.recv()
+        SNs = np.zeros((ToAs.shape[0],len(SNStreams)))
+        for groupID in range(groups):
+            if self.verbose:
+                print(f'Start group {groupID}')
+            gs = Time.now()
+            ## Determine group Indexes
+            groupStart = groupID*nPool
+            groupSize = min(nPool,ToAs.shape[0]-groupStart)
+        
+            ## Load Data
+            for i in range(groupSize):
+                procs[i].load_data_SNR([self.polyCoFreq,Time(ToAs[groupStart+i],format='unix'),self.pulseWidth,self.config['Correlating'].get('dedisperse')=='coherent'])
+            if self.verbose:
+                print(f'Reads Started at {(Time.now()-gs).to_value(u.min):.1f} minutes coherent is {self.config["Correlating"].get("dedisperse")=="coherent"}',flush=True)
+            ## Read data from each process as it becomes available
+            for i in range(groupSize):
+                results = procs[i].front_pipe.recv()
+                print(results)
+                SNs[groupStart+i]=results[1]
+                
+        for i in range(len(SNStreamNames)):
+            specsFile = f'SNR_{self.obsDate}_{self.sourceName}_{SNStreamNames[i]}.npz'
+            np.savez(os.path.join(self.dateDir,specsFile),SNR=SNs[:,i],ToA = ToAs)
+        for proc in procs:
+            proc.stop()

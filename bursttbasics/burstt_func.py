@@ -1,96 +1,12 @@
 from astropy.time import Time
 import astropy.units as u
+import astropy.constants as const
 import numpy as np
-from glob import glob
-from braceexpand import braceexpand
 
-from packet_func import *
-from burstt_const import *
+from .packet_func import *
+from .burstt_const import *
 from tqdm.notebook import tqdm
 import scintools.ththmod as thth
-
-def braced_glob(path):
-    l = []
-    for x in braceexpand(path):
-        l.extend(glob(x))
-            
-    return l
-
-def file_order(files,blockFrame=51200,headSize = 64,nBlock=1600):
-    dirs = []
-    fs = []
-    rings = []
-    beams = []
-    stamps = []
-    machines = []
-    
-    for file in files:
-        dr =''
-        sp = file.split('/')
-        for i in range(len(sp)-1):
-            sp[i]+='/'
-            if sp[i][:6]=='burstt':
-                try:
-                    machines.append(int(sp[i][6:-1]))
-                    continue
-                except:
-                    pass
-        dr = dr.join(sp[:-1])
-        dirs.append(dr)
-        parts = sp[-1].split('_')
-        f=None
-        ring=None
-        beam=None
-        fh = open(file,'rb')
-        hd = fh.read(headSize)
-        tmp = decHeader2(hd,verbose=False)
-        fh.close()
-        stamp = (tmp[0]//2)/(blockFrame*nBlock)
-        for i,p in enumerate(parts):
-            if p[:4]=='ring':
-                ring=p[4:]
-                continue
-            elif p[:4]=='beam':
-                beam = p[4:]
-                continue
-            elif p[0]=='f':
-                f=p[1:]
-                continue
-        rings.append(ring)
-        beams.append(beam)
-        fs.append(f)
-        stamps.append(stamp)
-    machines = np.array(machines)
-    dirs = np.array(dirs)
-    rings = np.array(rings)
-    fs = np.array(fs)
-    beams = np.array(beams)
-    stamps = np.array(stamps)
-    stamps-=stamps.min()
-    stamps=np.round(stamps)
-    
-    mU = np.sort(np.unique(machines))
-    dU = np.sort(np.unique(dirs))
-    rU = np.sort(np.unique(rings))
-    fU = np.sort(np.unique(fs))
-    # bU = np.sort(np.unique(beams))
-    sU = np.sort(np.unique(stamps))
-    fbystamp = []
-    stampbystamp = []
-    for m in mU:
-        for r in rU:
-            for s in sU:
-                tmp = []
-                tmp2 = []
-                for f in fU:
-                    for i in range(len(files)):
-                        if machines[i]==m and rings[i]==r and stamps[i]==s and fs[i]==f:
-                            tmp.append(files[i])
-                            tmp2.append(s)
-                            continue
-                fbystamp.append(tmp)
-                stampbystamp.append(tmp2)
-    return(fbystamp,stampbystamp)
 
 def gau1(x,A,x0,s,C):
     """ A simple 1D gaussian.
@@ -136,6 +52,52 @@ def power(x,A,gamma):
     """
     pwr = A*np.power(x,gamma)
     return(pwr)
+
+def frequency_model_polarized(f,A,n,RM,phi0,pf,N):
+    """
+    Pulse Spectral profile with RM fluctuations
+
+    Parameters
+    ===========
+    f - numpy array
+        Observing Frequency
+    A - float
+        Pulse Amplitude
+    n - float
+        Pulse spectral index
+    RM -  float
+        Pulse Rotation Measure
+    phi0 - float
+        RM Phase at 400MHz
+    pf - float
+        Polarization Fraction
+    """
+    I0 = A*np.power(f/400,n)
+    lam = (const.c/(f*u.MHz)).to(u.m)
+    I=I0*(1-pf + pf*np.cos(RM*lam.value**2+phi0)**2)
+    return(I+N)
+
+def frequency_model(f,A,n,N):
+    """
+    Pulse Spectral profile with RM fluctuations
+
+    Parameters
+    ===========
+    f - numpy array
+        Observing Frequency
+    A - float
+        Pulse Amplitude
+    n - float
+        Pulse spectral index
+    RM -  float
+        Pulse Rotation Measure
+    phi0 - float
+        RM Phase at 400MHz
+    pf - float
+        Polarization Fraction
+    """
+    I0 = A*np.power(f/400,n)
+    return(I0+N)
 
 def calculate_uvw(source, time, s1, s2):
     '''

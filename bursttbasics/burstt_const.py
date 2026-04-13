@@ -1,6 +1,7 @@
 from astropy.coordinates import EarthLocation
 import astropy.units as u
 import numpy as np
+import os
 
 K = 241.0331786*u.GHz**-2*u.cm**-3*u.pc/u.s
 
@@ -64,5 +65,18 @@ zLocalN = -2.195*u.m
 NN = yLocalN
 EN = xLocalN
 LTNCenter = offset_location(LTNGNSS,NN,EN,zLocalN)
+LTNCenter = EarthLocation(x=LTNCenter.x +16.38823593*u.m,
+                          y=LTNCenter.y-13.27957413*u.m,
+                          z=LTNCenter.z-16.47346749*u.m)
 
-GRNCenter = LTNCenter
+# GRNCenter = EarthLocation(lon = 121.5007*u.deg,lat = 22.6750*u.deg,height = 15.0*u.m)
+GRNCenter = EarthLocation(lon = 121*u.deg + 30*u.arcmin+4.29131*u.arcsecond,
+                          lat = 22*u.deg + 40*u.arcmin + 32.20767*u.arcsecond,
+                          height = 32.677*u.m)
+
+OGWCenter = EarthLocation(lon = 142*u.deg + 13*u.arcmin+0.87471*u.arcsecond,
+                          lat = 27*u.deg + 5*u.arcmin + 31.14852*u.arcsecond,
+                          height = 32.677*u.m)
+
+beamFile = 'beams_altaz_fus_16x16_b-7.5_-7.5_flim400_800_rot-3.0_sky400x700_ew-60_60_ns-70_70_att30n60_cal251027.npy'
+beamBounds = np.load(os.path.join(os.path.dirname(os.path.realpath(__file__)),beamFile), allow_pickle=True).item()

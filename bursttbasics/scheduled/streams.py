@@ -1,3 +1,6 @@
+"""
+Stream classes used to read and manipulate single beam scheduled recording data from a single station
+"""
 from astropy.time import Time
 import astropy.units as u
 import numpy as np
@@ -5,9 +8,9 @@ import os
 import sys
 
 
-from packet_func import *
-from burstt_func import *
-from burstt_const import *
+from ..packet_func import *
+from ..burstt_func import *
+from ..burstt_const import *
 from tqdm.notebook import tqdm
 
 from pint.models import get_model
@@ -18,6 +21,93 @@ import pint.logging
 from pycalc11 import Calc
 
 import pickle as pkl
+from glob import glob
+from braceexpand import braceexpand
+
+
+
+def braced_glob(path):
+    l = []
+    for x in braceexpand(path):
+        l.extend(glob(x))
+            
+    return l
+
+def file_order(files,blockFrame=51200,headSize = 64,nBlock=1600):
+    dirs = []
+    fs = []
+    rings = []
+    beams = []
+    stamps = []
+    machines = []
+    
+    for file in files:
+        dr =''
+        sp = file.split('/')
+        for i in range(len(sp)-1):
+            sp[i]+='/'
+            if sp[i][:6]=='burstt':
+                try:
+                    machines.append(int(sp[i][6:-1]))
+                    continue
+                except:
+                    pass
+        dr = dr.join(sp[:-1])
+        dirs.append(dr)
+        parts = sp[-1].split('_')
+        f=None
+        ring=None
+        beam=None
+        fh = open(file,'rb')
+        hd = fh.read(headSize)
+        tmp = decHeader2(hd,verbose=False)
+        fh.close()
+        stamp = (tmp[0]//2)/(blockFrame*nBlock)
+        for i,p in enumerate(parts):
+            if p[:4]=='ring':
+                ring=p[4:]
+                continue
+            elif p[:4]=='beam':
+                beam = p[4:]
+                continue
+            elif p[0]=='f':
+                f=p[1:]
+                continue
+        rings.append(ring)
+        beams.append(beam)
+        fs.append(f)
+        stamps.append(stamp)
+    machines = np.array(machines)
+    dirs = np.array(dirs)
+    rings = np.array(rings)
+    fs = np.array(fs)
+    beams = np.array(beams)
+    stamps = np.array(stamps)
+    stamps-=stamps.min()
+    stamps=np.round(stamps)
+    
+    mU = np.sort(np.unique(machines))
+    dU = np.sort(np.unique(dirs))
+    rU = np.sort(np.unique(rings))
+    fU = np.sort(np.unique(fs))
+    # bU = np.sort(np.unique(beams))
+    sU = np.sort(np.unique(stamps))
+    fbystamp = []
+    stampbystamp = []
+    for m in mU:
+        for r in rU:
+            for s in sU:
+                tmp = []
+                tmp2 = []
+                for f in fU:
+                    for i in range(len(files)):
+                        if machines[i]==m and rings[i]==r and stamps[i]==s and fs[i]==f:
+                            tmp.append(files[i])
+                            tmp2.append(s)
+                            continue
+                fbystamp.append(tmp)
+                stampbystamp.append(tmp2)
+    return(fbystamp,stampbystamp)
 
 class Stream:
     """
@@ -50,15 +140,24 @@ class Stream:
         self._get_fbystamp()
 
         ## Generate start times for each block
-        self._get_epochs(notebook,progressOrder)
+        self._get_epochs(config,notebook,progressOrder)
 
     def _get_fbystamp(self):
+        """
+        Sort data files by epoch
+        """
         self.fbystamp = []
 
     def _get_block_byte(self):
+        """
+        Determine Number of Bytes per block of data
+        """
         self.blockByte = 0
 
     def _read_config(self,config):
+        """
+        Read conf
+        """
         self.rebin=1
         self.analysisPars =  config['Analysis Properties']
         self.observationPars = config['Observation Properties']
@@ -117,7 +216,7 @@ class Stream:
         self.nChan = 0
         self._get_block_byte()
         
-    def _get_epochs(self,notebook, progressOrder = -1):
+    def _get_epochs(self,config,notebook=False, progressOrder = -1):
         """ Determine start time for all blocks in dataset.
 
         Parameters
@@ -160,13 +259,18 @@ class Stream:
         return(epoch,block)
 
     def load_chain(self,order,segment,verbose=False):
-        files = []
-        bID = np.zeros(0)
-        fID = 0
-        bID2 = bID
-        spec  = np.zeros((segment[2], self.blockFrame, self.nChan), dtype=np.complex64)
-        pcnt  = np.zeros(segment[2], dtype=np.int64)
-        epoch = np.zeros(segment[2])
+        try:
+            files = []
+            bID = np.zeros(0)
+            fID = 0
+            bID2 = bID
+            spec  = np.zeros((segment[2], self.blockFrame, self.nChan), dtype=np.complex64)
+            pcnt  = np.zeros(segment[2], dtype=np.int64)
+            epoch = np.zeros(segment[2])
+        except Exception as e:
+            print(f'In load_chain({sys.exc_info()[2].tb_lineno}): {e}',flush=True)
+            print(segment)
+            raise(e)
         return(spec, pcnt, epoch)
             
     def read_order(self,epoch,startBlock,length,order,verbose=False):
@@ -279,26 +383,30 @@ class Stream:
             Voltage spectrum for the given suband
         """
         ## As above, but incoherently dedisperses and only saves a portion of the data
-        spec = self.basic_spec(self.nChan,nFrame+20)
-        e = epoch
-        b = startBlock
-        px = np.linspace(0,int(self.blockFrame/self.rebin)-1,int(self.blockFrame/self.rebin),dtype=int)+baseOff
-        pxEnd = np.round(pxStart).astype(int)+nFrame+20
-        pxStartI = np.round(pxStart).astype(int)
-        for bid in range(length):
-            bspec, pcnt, falseEpoch  = self.load_chain(order,[e,b,1],verbose=verbose)
-            for i in range(bspec.shape[2]):
-                if (pxEnd[i] > px[0]) and (pxStartI[i] < px[-1]):
-                    ss = max(0,px[0]-pxStartI[i])
-                    se = min(nFrame+20,px[-1]-pxStartI[i]+1)
-                    bss = max(0,pxStartI[i]-px[0])
-                    bse = min(int(self.blockFrame/self.rebin),pxEnd[i]-px[0])
-                    spec[ss:se,i] = bspec[0,bss:bse,i]
-            px+=int(self.blockFrame/self.rebin)
-            b+=1
-            if b==self.nBlock*self.nf:
-                b=0
-                e+=1
+        try:
+            spec = self.basic_spec(self.nChan,nFrame+20)
+            e = epoch
+            b = startBlock
+            px = np.linspace(0,int(self.blockFrame/self.rebin)-1,int(self.blockFrame/self.rebin),dtype=int)+baseOff
+            pxEnd = np.round(pxStart).astype(int)+nFrame+20
+            pxStartI = np.round(pxStart).astype(int)
+            for bid in range(length):
+                bspec, pcnt, falseEpoch  = self.load_chain(order,[e,b,1],verbose=verbose)
+                for i in range(bspec.shape[2]):
+                    if (pxEnd[i] > px[0]) and (pxStartI[i] < px[-1]):
+                        ss = max(0,px[0]-pxStartI[i])
+                        se = min(nFrame+20,px[-1]-pxStartI[i]+1)
+                        bss = max(0,pxStartI[i]-px[0])
+                        bse = min(int(self.blockFrame/self.rebin),pxEnd[i]-px[0])
+                        spec[ss:se,i] = bspec[0,bss:bse,i]
+                px+=int(self.blockFrame/self.rebin)
+                b+=1
+                if b==self.nBlock*self.nf:
+                    b=0
+                    e+=1
+        except Exception as e:
+            print(f'In read_order_dedis({sys.exc_info()[2].tb_lineno}): {e}',flush=True)
+            raise(e)
         return(spec)
 
     def time_to_frames(self,time):
@@ -363,7 +471,7 @@ class Stream:
                     # print(f'Dedisperse in {(Time.now()-ts).to_value(u.min):.1f} minutes',flush=True)
             return(spec,tStart)
         except Exception as e:
-            print(f'In read_around_dedis({sys.exc_info()[2].tb_lineno}): {e}')
+            print(f'In read_around_dedis({sys.exc_info()[2].tb_lineno}): {e}',flush=True)
             return(spec*np.nan,tStart)
 
     def _pulsar_prep(self,config):
@@ -404,15 +512,22 @@ class Stream:
             elif self.sourcePars.get('referencePhase'):
                 self.ToAs_from_pref(self.sourcePars.getfloat('referencePhase'))
             elif os.path.exists(self.profileFile):
-                self.profile = np.load(self.profileFile)
-                self.profilePhases = np.linspace(-.5,.5,self.profile.shape[1]+1)
-                self.profilePhases = (self.profilePhases[1:]+self.profilePhases[:-1])/2
+                self.read_profile_file()
                 self.ToAs_from_prof()
 
-    def ToAs_from_prof(self):
+    def read_profile_file(self):
+        self.profile = np.load(self.profileFile)
+        self.profilePhases = np.linspace(-.5,.5,self.profile.shape[1]+1)
+        self.profilePhases = (self.profilePhases[1:]+self.profilePhases[:-1])/2
+        # self.ToAs_from_prof()
+
+    def get_flat_profile(self):
         v = self.profile.var(1)
         v2 = sigma_clip(v, sigma=2.0)
         self.profileFlat = np.mean(self.profile[~v2.mask],0)
+
+    def ToAs_from_prof(self):
+        self.get_flat_profile()
         self.ToAs_from_pref(self.profilePhases[np.argmax(self.profileFlat)]) 
 
     def ToAs_from_tref(self,tref):
@@ -475,7 +590,7 @@ class Stream:
             folded[i,:],__ = np.histogram(phases[np.isfinite(column)],weights=column[np.isfinite(column)],bins=np.linspace(-.5,.5,nBins+1))
             wts[i,:],__ = np.histogram(phases[np.isfinite(column)],bins=np.linspace(-.5,.5,nBins+1))
         return(folded,wts)
-            
+             
 
 class Baseband(Stream):
     """
@@ -584,7 +699,7 @@ class Baseband(Stream):
         else:
             self.bandWidth = config.getfloat('Observation Properties', 'bandWidth')*u.MHz
         self.freq = np.linspace(self.f0,self.f0+self.bandWidth,self.nChan0,endpoint=False)
-        self.freq -= (self.freq[1]-self.freq[0])*config.getfloat(self.name, 'fOffset')
+        self.freq -= (self.freq[1]-self.freq[0])*config[self.name].getfloat('fOffset',0)
 
         ## DM (Not always required)
         self.DM = config['Source Properties'].getfloat('DM',0) * u.pc/u.cm**3
@@ -597,7 +712,7 @@ class Baseband(Stream):
         self._get_block_byte()
         self.rebin=1
         
-    def _get_epochs(self,notebook, progressOrder = -1):
+    def _get_epochs(self,config,notebook = False, progressOrder = -1):
         """ Determine start time for all blocks in dataset.
 
         Parameters
@@ -638,29 +753,42 @@ class Baseband(Stream):
                     fh.close()
             np.save(self.blockStartFile,self.blockStart.value)
         self.nEpochs = int(self.blockStart.shape[0]//self.nOrder)
-        self.earliest = np.nanmin(self.blockStart)
-        self.latest = np.nanmax(self.blockStart)+self.frameSec*(self.blockFrame-1)
+        if config[self.name].getboolean('forceStarts',False):
+            self.rawStart = np.copy(self.blockStart)
+            epoch = np.mod(np.linspace(0,self.blockStart.shape[0]-1,self.blockStart.shape[0]),self.nEpochs)
+            block = np.linspace(0,self.nBlock-1,self.nBlock)
+            file = np.linspace(0,self.nf-1,self.nf)
+
+            self.blockStart = self.rawStart[0,0,0]+(file[np.newaxis,np.newaxis,:] + self.nf*(block[np.newaxis,:,np.newaxis] + self.nBlock*epoch[:,np.newaxis,np.newaxis]))*self.blockFrame*self.frameSec
+            self.blockStart[np.invert(np.isfinite(self.rawStart))]=np.nan
+        self.earliest = self.blockStart[0,0,0]
+        lid = np.argwhere(np.isfinite(self.blockStart))[-1]
+        self.latest = self.blockStart[lid[0],lid[1],lid[2]]+self.frameSec*(self.blockFrame-1)
 
     def load_chain(self,order,segment,verbose=False):
-        files = self.fbystamp[self.nEpochs*order+segment[0]]
-        bID = np.linspace(0,segment[2]-1,segment[2],dtype=int)+segment[1]
-        fID = np.mod(bID,self.nf)
-        bID2 = (bID//self.nf).astype(int)
-        spec  = np.zeros((segment[2], self.blockFrame, self.nChan), dtype=np.complex64)
-        pcnt  = np.zeros(segment[2], dtype=np.int64)
-        epoch = np.zeros(segment[2])
+        try:
+            files = self.fbystamp[self.nEpochs*order+segment[0]]
+            bID = np.linspace(0,segment[2]-1,segment[2],dtype=int)+segment[1]
+            fID = np.mod(bID,self.nf)
+            bID2 = (bID//self.nf).astype(int)
+            spec  = np.zeros((segment[2], self.blockFrame, self.nChan), dtype=np.complex64)
+            pcnt  = np.zeros(segment[2], dtype=np.int64)
+            epoch = np.zeros(segment[2])
 
-        for i in range(segment[2]):
-            tmp = loadBeam(files[fID[i]],
-                           nStart=bID2[i],
-                           nBlock=1,
-                           nFrame=self.blockFrame,
-                           nChan=self.nChan,
-                           hdlen=self.headSize,
-                           verbose=verbose)
-            spec[i]  = tmp[0][0]
-            pcnt[i]  = tmp[1][0]
-            epoch[i] = tmp[2][0]
+            for i in range(segment[2]):
+                tmp = loadBeam(files[fID[i]],
+                            nStart=bID2[i],
+                            nBlock=1,
+                            nFrame=self.blockFrame,
+                            nChan=self.nChan,
+                            hdlen=self.headSize,
+                            verbose=verbose)
+                spec[i]  = tmp[0][0]
+                pcnt[i]  = tmp[1][0]
+                epoch[i] = tmp[2][0]
+        except Exception as e:
+            print(f'In load_chain({sys.exc_info()[2].tb_lineno}): {e}\n',flush=True)
+            print(f'S:{segment}, fl:{len(files)}, fidl:{fID.shape[0]}, i:{i}\n',flush=True)
         return(spec, pcnt, epoch)
     
     def read_order(self,epoch,startBlock,length,order,verbose=False):
@@ -778,7 +906,7 @@ class Intensity(Stream):
         else:
             self.bandWidth = config.getfloat('Observation Properties', 'bandWidth')*u.MHz
         self.freq = np.linspace(self.f0,self.f0+self.bandWidth,self.nChan0,endpoint=False)
-        self.freq -= (self.freq[1]-self.freq[0])*config.getfloat(self.name, 'fOffset')
+        self.freq -= (self.freq[1]-self.freq[0])*config[self.name].getfloat('fOffset',0)
 
         ## DM (Not always required)
         self.DM = config['Source Properties'].getfloat('DM',0) * u.pc/u.cm**3
@@ -794,7 +922,7 @@ class Intensity(Stream):
 
         
         
-    def _get_epochs(self,notebook, progressOrder = -1):
+    def _get_epochs(self,config,notebook=False, progressOrder = -1):
         """ Determine start time for all blocks in dataset.
 
         Parameters

@@ -1,10 +1,11 @@
 from multiprocessing import Process, Pipe
 import numpy as np
-from burstt_func import *
-from burstt_const import *
+from ..burstt_func import *
+from ..burstt_const import *
 import astropy.units as u
 import astropy.constants as const
 from astropy.time import Time
+from scipy.optimize import curve_fit
 
 
 class SinglePulseProcess(Process):
@@ -33,6 +34,8 @@ class SinglePulseProcess(Process):
             self.correlate__(message[1])
         elif message[0] == "save cut":
             self.save_cuts__(message[1])
+        elif message[0] == "load SNR":
+            self.load_SNR__(message[1])
         elif message[0] == 'get':
             self.get__(message[1])
         else:
@@ -49,6 +52,8 @@ class SinglePulseProcess(Process):
 
     def load_data(self,x):
         self.front_pipe.send(['load',x])
+    def load_data_SNR(self,x):
+        self.front_pipe.send(['load SNR',x])
 
     def correlate(self,x):
         self.front_pipe.send(['correlate',x])
@@ -73,10 +78,52 @@ class SinglePulseProcess(Process):
             spec,tStart = obs.read_around_dedis(*x)
             self.var.append(spec.var(0))
             self.Is.append(np.ma.array(np.reshape(np.abs(spec[:400*(spec.shape[0]//400)])**2,(-1,400,spec.shape[1])).mean(1),mask=False))
-            self.tStarts.append(tStart)
+            self.tStarts.append(tStart) 
             self.specs.append(np.ma.array(spec,mask=False))
             # print(spec.shape)
         self.back_pipe.send(['data loaded',self.Is,self.var])
+
+    def load_SNR__(self,x):
+        profFits = []
+        for j in range(len(self.observations)):
+            C0 = np.median(self.observations[j].profileFlat)
+            A0 = np.max(self.observations[j].profileFlat)-C0
+            x00 =  self.observations[j].profilePhases[np.argmax(self.observations[j].profileFlat)]
+            s0 = .1
+            p0 = np.array([A0,x00,s0,C0])
+            profFits.append(curve_fit(gau1,
+                                    self.observations[j].profilePhases,
+                                    self.observations[j].profileFlat,
+                                    p0 = p0)[0])
+        SNs = np.zeros(len(self.observations))
+        for i,obs in enumerate(self.observations):
+            spec,tStart = obs.read_around_dedis(*x)
+            times = tStart+np.linspace(0,spec.shape[0]-1,spec.shape[0])*obs.frameSec
+            phases = obs.polyco.eval_phase(times.mjd)
+            I = np.abs(spec)**2
+            rb = 400
+            Ir = np.reshape(I[:rb*(I.shape[0]//rb)],(-1,rb,I.shape[1])).mean(1)
+            IrMed = np.median(Ir,0)
+            I/=IrMed
+            Ir/=IrMed
+            var = Ir.var(0)
+            var2 = sigma_clip(var,2)
+            I[:,var2.mask]=np.nan
+
+            I1D = np.nanmean(I,1)
+            model = gau1(phases,*profFits[i])
+            # plt.figure()
+            # plt.plot(self.observations[j].profilePhases,self.observations[j].profileFlat)
+            # plt.plot(self.observations[j].profilePhases,gau1(self.observations[j].profilePhases,*profFits[i]))
+            # plt.plot(phases,model)
+            # plt.savefig(f'{tStart.mjd}_{self.observations[i].name}.png')
+            # plt.close()
+            model -= profFits[i][-1]
+            model/=np.nansum(model)
+            SNs[i] = np.nansum((I1D-1)*model)
+            
+
+        self.back_pipe.send(['data loaded',SNs])
 
     def save_cuts__(self,fname):
         for i in range(len(self.specs)):
@@ -85,17 +132,17 @@ class SinglePulseProcess(Process):
         self.back_pipe.send(['cuts saved'])
 
     def correlate__(self,x):
-        masks,pT,pF,width,nSearch,predictedDelays,dmSearch,fref,dmPhase = x
+        masks,pT,pF,width,nSearch,predictedDelays,dmSearch,fref,dmPhase,nPad = x
         if dmSearch:
             dms = np.concatenate((-np.logspace(-4,-6,10),np.zeros(1),np.logspace(-6,-4,10)))*u.pc/u.cm**3
         else:
             dms = np.zeros(1)*u.pc/u.cm**3
         for i in range(len(masks)):
-            self.specs[i].mask = masks[i].reshape((-1,masks[i].shape[0]))
+            self.specs[i][:,masks[i]] = np.nan+1j*np.nan
+            # self.specs[i].mask = masks[i].reshape((-1,masks[i].shape[0]))
         summaries = []
         tPeaks = []
         offsets = []
-
         bb = 0
         for specID0 in range(len(self.specs)-1):
             freq0 = self.observations[specID0].freq
@@ -115,6 +162,7 @@ class SinglePulseProcess(Process):
                 else:
                     spec0 = np.copy(self.specs[specID0][peakPx-width:peakPx+width])
                 for deltaID1 in range(len(self.specs)-specID0-1):
+                    
                     baseID = bb+deltaID1
                     ts = Time.now()
                     specID1 = specID0+deltaID1+1
@@ -123,32 +171,44 @@ class SinglePulseProcess(Process):
                     fOverlap1 = (freq1>=freq0.min())*(freq1<=freq0.max())
                     ## Model coordinates
                     freq = freq0[fOverlap0]
-                    
-                    
+                    baseNF = freq.shape[0]
+                    prePad = 0
+                    postPad = 0
+                    if nPad>0:
+                        if nPad<baseNF:
+                            prePad = 0
+                            postPad = (nPad-baseNF)
+                        else:
+                            postPad = max(0,min(nPad,1024)-baseNF)
+                            if nPad > 1024:
+                                prePad = nPad - 1024
+                    nf = baseNF + prePad + postPad
+                    cross2D = np.zeros((spec0.shape[0],nf),dtype=np.complex64)*np.nan
                     ## Cutout and normalize spec0
-                    spec0_con = np.conjugate(spec0[:,fOverlap0])[:,:640]
+                    spec0_con = np.conjugate(spec0[:,fOverlap0])
                     spec0_con /= np.ma.abs(spec0_con)
                     # print(spec0_con.shape)
-                    summaries.append(np.zeros((dms.shape[0],nSearch,spec0_con.shape[1]),dtype=np.complex64))
-                    model = fModel[fOverlap0][np.newaxis,:640]*tModel[:,np.newaxis]
+                    summaries.append(np.zeros((dms.shape[0],nSearch,nf),dtype=np.complex64))
+                    model = fModel[fOverlap0][np.newaxis,:]*tModel[:,np.newaxis]
                     spec0_con *= model[peakPx-width:peakPx+width]
                     if dmID == 0:
                         offsets.append((np.linspace(0,nSearch-1,nSearch) - nSearch//2 + predictedDelays[baseID])*self.observations[0].frameSec)
                     tPeaks.append([self.tStarts[0].unix+times[peakPx].to_value(u.s)])
+                    rawSize = min(spec0_con.shape[1],nf)
                     for i in range(nSearch):
                         j = i - nSearch//2 +predictedDelays[baseID]
                         ## Cutout and normalize shifted spec1
-                        spec1_sel = self.specs[specID1][peakPx-width+j:peakPx+width+j][:,fOverlap1][:,:640]
+                        spec1_sel = self.specs[specID1][peakPx-width+j:peakPx+width+j][:,fOverlap1]
                         if not spec1_sel.shape[0]==spec0_con.shape[0]:
                             continue
                         ## Correlate
-                        cross2D = spec1_sel * spec0_con
-                        cross2D /= np.ma.abs(spec1_sel)
+                        cross2D[:, prePad : prePad + rawSize] = spec1_sel[:,:rawSize] * spec0_con[:,:rawSize]
+                        cross2D[:, prePad : prePad + rawSize] /= np.ma.abs(spec1_sel[:,:rawSize])
                         # cross2D *= model[peakPx-width:peakPx+width]
-                        cross2D.fill_value = 0+0j
+                        # cross2D.fill_value = np.nan+np.nan*1j
                         cross2D -= np.nanmean(cross2D)
                         ## FFT
-                        FTcross = np.fft.fftshift(np.fft.fft2(np.nan_to_num(cross2D.filled())))
+                        FTcross = np.fft.fftshift(np.fft.fft2(np.nan_to_num(cross2D)))
                         FTamp = np.abs(FTcross)
                         ## Normalize and take fd=0 (average over time) response
                         summaries[baseID][dmID,i] = FTcross[width]/np.median(FTamp)
@@ -312,9 +372,10 @@ class SingleChunkProcess(Process):
         self.back_pipe.send(['data loaded',self.Is,self.var])
 
     def correlate__(self,x):
-        masks,nSearch,doFFT,predictedDelays = x
+        masks,nSearch,doFFT,predictedDelays,norms = x
         for i in range(len(masks)):
             self.specs[i].mask = masks[i].reshape((-1,masks[i].shape[0]))
+            self.specs[i]/=norms[i]
         summaries = []
         tPeaks = []
         offsets = []
@@ -356,8 +417,8 @@ class SingleChunkProcess(Process):
                     cross2D = spec1_sel * spec0_con
                     # cross2D /= np.ma.abs(spec1_sel)
                     # cross2D *= model[peakPx-width:peakPx+width]
-                    cross2D.fill_value = 0+0j
                     cross2D -= cross2D.mean()
+                    cross2D.fill_value = 0+0j
                     ## FFT
                     if doFFT:
                         FTcross = np.fft.fft2(cross2D.filled())
