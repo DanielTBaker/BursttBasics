@@ -5,19 +5,15 @@ from .parallel import *
 from .streams import *
 
 import configparser
-import sys
 from astropy.time import Time
 from multiprocessing.pool import Pool
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-import scintools.ththmod as thth
 from scipy.optimize import curve_fit
 import astropy.constants as const
 
 from pint.models import get_model
-from pint.polycos import Polycos
-from  pint.observatory.topo_obs import TopoObs
-from astropy.coordinates import EarthLocation,SkyCoord
+from astropy.coordinates import SkyCoord
 import pint.logging
 import os
 from pycalc11 import Calc
@@ -351,7 +347,7 @@ class Observation:
                                        I[streamID].shape[0]*400)*stream.frameSec.to(u.ms)
                 plotTime = np.reshape(plotTime,(-1,400)).mean(1)
                 plotFreq = np.reshape(stream.freq,(-1,32)).mean(1)
-                ext = thth.ext_find(plotTime,plotFreq)
+                ext = ext_find(plotTime,plotFreq)
                 plt.figure(figsize=(6,6))
                 plt.subplot(grid[:3,:3])
                 plt.imshow(I[streamID].T,
@@ -550,7 +546,7 @@ class Observation:
                                        I[streamID].shape[0]*400)*stream.frameSec.to(u.ms)
                 plotTime = np.reshape(plotTime,(-1,400)).mean(1)
                 plotFreq = np.reshape(stream.freq,(-1,32)).mean(1)
-                ext = thth.ext_find(plotTime,plotFreq)
+                ext = ext_find(plotTime,plotFreq)
                 plt.figure(figsize=(6,6))
                 plt.subplot(grid[:3,:3])
                 plt.imshow(I[streamID].T,
@@ -671,7 +667,7 @@ class Observation:
         grid = plt.GridSpec(nrows=1,ncols=2,width_ratios=[3,1])
         plt.figure(figsize=(8,16))
         plt.subplot(grid[0,0])
-        ext = thth.ext_find(rolledDelays,fullToAs)
+        ext = ext_find(rolledDelays,fullToAs)
         plt.imshow(np.abs(fullArr),
                 origin='lower',aspect='auto',
                 vmin=1,vmax=3,
@@ -679,7 +675,7 @@ class Observation:
         plt.ylabel(r'$\rm{Arrival~Time}~\left(\rm{s}\right)$')
         plt.xlabel(r'$\rm{Delay}~\left(\mu\rm{s}\right)$')
 
-        ext2 = thth.ext_find(shiftedDelays.to(u.us),fullToAs)
+        ext2 = ext_find(shiftedDelays.to(u.us),fullToAs)
         plt.subplot(grid[0,1])
         plt.imshow(np.abs(shiftedArr),
                 origin='lower',aspect='auto',

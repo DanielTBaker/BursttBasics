@@ -10,11 +10,8 @@ import astropy.constants as const
 from ..burstt_func import *
 from .plotting import ext_find
 from pycalc11 import Calc
-import sys
 
-if not '/burstt_home/dbaker/BursttBasics' in sys.path:
-    sys.path.insert(0,'/burstt_home/dbaker/BursttBasics')
-from packet_func import *
+from ..packet_func import *
 from ..burstt_const import *
 from ..burstt_func import *
 from scipy.interpolate import interp1d
@@ -89,6 +86,9 @@ class StationDump:
         self.clipped = True
 
     def fit_spec(self,polFit=True,rbin=400,freqMin = -np.inf,freqMax = np.inf,**kwargs):
+        """
+        Fit a simple pulse profile to the spectrum
+        """
         I = np.abs(self.spec)**2
         I2 = np.reshape(I[:,:rbin*(I.shape[1]//rbin)],(I.shape[0],-1,rbin)).mean(2)
         t2 = np.reshape(self.time[:rbin*I2.shape[1]],(-1,rbin)).mean(1).to(u.ms)
@@ -135,9 +135,15 @@ class StationDump:
                                        bounds = ((0,-np.inf,-np.inf),(np.inf,np.inf,np.inf)),method='dogbox')
         self.modeled = True
     def apply_freq_mask(self,mask,nanVal=True):
+        """
+        Apply a mask to the data
+        """
         self.spec[mask==nanVal]=np.nan
 
     def calc_SNR(self,t,I,meanSub=True,freqMin = -np.inf,freqMax = np.inf,onWidth=5):
+        """
+        Calculate pulse SNR
+        """
         SNR = np.nansum(I[(self.freq.value>=freqMin)*(self.freq.value<=freqMax)],0)
         on = np.abs(t-t[np.argmax(SNR)])<=(onWidth+.1)*(t[1]-t[0])
         if meanSub:
@@ -146,6 +152,9 @@ class StationDump:
         return(SNR,on)
 
     def calc_spec(self,I,wts,noiseSub=False):
+        """
+        Get SNR vs Frequency
+        """
         SF = np.nansum(I*wts,1)
         NF = np.nansum(I*np.roll(wts,wts.shape[0]//2),1)
         # NF = np.nanmedian(I,1)
@@ -155,6 +164,9 @@ class StationDump:
         return(SNRF)
 
     def plot_spec(self,showModel = False,rbt = 400,rbf = 32,freqMin = -np.inf, freqMax = np.inf,onWidth=5):
+        """
+        Plot intensity as well as time and frequency SNR
+        """
         I = np.abs(self.spec)**2
         I2 = np.nanmean(np.reshape(I[:,:rbt*(I.shape[1]//rbt)],(1024,-1,rbt)),2)
         t2 = np.reshape(self.time[:rbt*I2.shape[1]],(-1,rbt)).mean(1)
@@ -202,13 +214,22 @@ class StationDump:
         plt.axvline(0,ls='--',c='k',alpha=.5)
 
 def get_mean_overlap(station0,station1):
+    """
+    Determine mean of frequency overlap between two stations
+    """
     return(get_f_overlap(station0,station1).mean())
 
 def get_f_overlap(station0,station1):
+    """
+    Get frequency overlap between two station
+    """
     use0,_ = get_overlap_mask(station0,station1)
     return(station0.freq[use0])
 
 def get_overlap_mask(station0,station1):
+    """
+    Frequency overlap masks for two stations
+    """
     f0 = station0.freq
     f1 = station1.freq
     use0 = (f0>=f1.min())*(f0<=f1.max())
@@ -216,6 +237,9 @@ def get_overlap_mask(station0,station1):
     return(use0,use1)
 
 def get_start_off(station0,station1):
+    """
+    Determine offset in start time between two station
+    """
     t0 = station0.ep0
     t1 = station1.ep0
     if isinstance(t0,np.ndarray) and isinstance(t1,np.ndarray):
@@ -233,12 +257,18 @@ def get_start_off(station0,station1):
     t1+=(station1.DM/K)*(1/fref**2 - 1/station1.freq[0]**2)
     return((t0-t1).to(u.us))
 
-def dump_delay(stations,source,mode='center',decOff=0,raOff=0):
+def dump_delay(stations,source,mode='center',decOff=0,raOff=0,**kwargs):
+    """
+    Determine rate and delay of source signal between multiple stations
+    """
     srce = SkyCoord(ra=[source.ra+raOff],dec=[source.dec+decOff])
-    if isinstance(stations[0].ep0,np.ndarray):
-        epoch = Time(Time(stations[0].ep0[0],format='unix').isot)
+    if 'time' in kwargs:
+        epoch=kwargs['time']
     else:
-        epoch = Time(Time(stations[0].ep0,format='unix').isot)
+        if isinstance(stations[0].ep0,np.ndarray):
+            epoch = Time(Time(stations[0].ep0[0],format='unix').isot)
+        else:
+            epoch = Time(Time(stations[0].ep0,format='unix').isot)
     ci = Calc(
             station_names = [station.station for station in stations],
             station_coords=[eval(f'{station.station}Center') for station in stations],

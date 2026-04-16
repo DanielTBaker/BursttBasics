@@ -1,28 +1,7 @@
 import numpy as np
 import astropy.units as u
 import matplotlib.pyplot as plt
-
-def ext_find(x, y):
-    """
-    Determine extent for imshow to center bins at given coordinates
-
-    Parameters
-    ----------
-    x : `~astropy.units.Quantity`
-        X coordinates of data
-    y : `~astropy.units.Quantity`
-        Y coordiantes of data
-
-    """
-    dx = np.diff(x).mean()
-    dy = np.diff(y).mean()
-    ext = [
-        (x[0] - dx / 2).value,
-        (x[-1] + dx / 2).value,
-        (y[0] - dy / 2).value,
-        (y[-1] + dy / 2).value,
-    ]
-    return ext
+from ..burstt_func import ext_find
 
 def plot_corr(offsets,tau,corrs,**kwargs):
     

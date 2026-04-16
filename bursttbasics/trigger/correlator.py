@@ -34,10 +34,13 @@ def correlate_dump(s0,s1,
     
 
     """
+    ## Determine freq overlap
     f0 = s0.freq
     f1 = s1.freq
     use0 = (f0>=f1.min())*(f0<=f1.max())
     use1 = (f1>=f0.min())*(f1<=f0.max())
+    ## If using a model weight determine the weights
+    ## also determine bounds of region to correlate
     if weight:
         modelT = gau1(s0.time.to_value(u.ms),*s0.poptT)-s0.poptT[-1]
         modelF = s0.freq_function(f0.value,*s0.poptF)-s0.poptF[-1]
@@ -52,20 +55,23 @@ def correlate_dump(s0,s1,
     else:
         id0=idPeak-width//2
 
+    ## Crop and conjugate spectrum from 1st station
     spec0 = np.conjugate(s0.spec[use0,id0:id0+width])
+    ## Determine time from reference for each sample and correct rate
     if not rate==0:
         t = s0.time[id0:id0+width][np.newaxis,:]+(s0.ep0[use0]-s0.ep0[0])[:,np.newaxis]*u.s -idPeak*sampleTime
         f = s0.freq[use0]*1
         spec0 *= np.exp(-1j*2*np.pi*(f[:,np.newaxis]*(rate*t)).to_value(u.dimensionless_unscaled))
+    ## Apply correction for ionospheric DM difference
     if not dDM ==0:
         dP = ((dDM/K)/s0.freq[use0]).to_value(u.dimensionless_unscaled)
         spec0 *= np.exp(-1j*2*np.pi*dP)[:,np.newaxis]
     
+
+    ## Check difference in start times
     startDiff = get_start_off(s0,s1)
     startOff = int(np.round(startDiff/sampleTime))
-    # if isinstance(s0.ep0,np.ndarray):
-    #     spec0*=np.exp(-1j*2*np.pi*(s0.freq[use0]*(s1.ep0[use1]*u.s+startOff*sampleTime-s0.ep0[use0]*u.s)).to_value(u.dimensionless_unscaled))[:,np.newaxis]
-
+   
     startResidual = startDiff - startOff*sampleTime
     offsets = np.linspace(-maxOff,maxOff,2*maxOff+1,dtype=int)+baseOff
     corrs = np.zeros((spec0.shape[0],offsets.shape[0]),dtype=np.complex64)
@@ -74,16 +80,21 @@ def correlate_dump(s0,s1,
     if progress:
         iterator=tqdm(iterator,total=2*maxOff+1,leave=leave)
     
+    
     try:
         for ido,o in iterator:
+            ## Shift second station against first and multiple
             cross[:,:] = spec0*s1.spec[use1,id0+o+startOff:id0+o+startOff+width]
+            ## Normalize and apply weights
             cross/=np.abs(cross)
             if weight:
                 cross/=np.abs(cross)
                 cross*=model
+            ## FFT allong frequency for fine delay
             cross-=np.nanmean(cross)
             fCross = np.fft.fft2(np.nan_to_num(cross))
             fAmp = np.abs(fCross)
+            ## Record correlation vs fine delay for given coarse shift
             corrs[:,ido] = np.fft.fftshift(fCross[:,0])/np.median(fAmp)
     except Exception as e:
         print('----')
@@ -95,14 +106,33 @@ def correlate_dump(s0,s1,
         print('----')
         raise e
 
-    tau = thth.fft_axis(f0[use0],u.ns)
+    tau = fft_axis(f0[use0],u.ns)
     tRef = Time(s0.ep0[0],format='unix')+idPeak*sampleTime
     return(offsets,tau,corrs,startResidual,tRef)
 
 
 def find_rate_dm(station0,station1,baseDelay,baseRate,
                  searchFrac=.1,maxOff=20,dDMRange=1e-5*u.pc/u.cm**3,dDMFitRange=0,
-                 plot=False,progress=False,nRate=61,nDMs=1001,width=2048,weight=True,gauFit = False,showPrediction=True):
+                 plot=False,progress=False,nRate=61,nDMs=1001,width=2048,weight=True,idPeak=None,gauFit = False,showPrediction=True):
+    """ 
+    Search for dDM and rate that maximize correlation amplitude
+
+    Parameters
+    ----------
+    station0 : bursttcorr.dumpclass.StationDump
+        Dumped data from station 0
+    station1 : bursttcorr.dumpclass.StationDump
+        Dumped data from station 1
+    baseDelay : astropy.Quantity
+        reference delay to search around
+    maxOff : int
+        Number of coarse shifts to search on either side of baseDelay
+    baseRate: astropy.Quantity
+        Reference rate
+    searchFrac : float
+        fraction of baseRate to search on either side (searchFrac=1 -> seach from 0 to 2*baseRate)    
+
+    """
     dmSlope = -station0.DM
     fOverlap = get_f_overlap(station0,station1)
     baseOff = int((baseDelay//(2.56*u.us)).to_value(u.dimensionless_unscaled))
@@ -111,7 +141,7 @@ def find_rate_dm(station0,station1,baseDelay,baseRate,
                                       weight=weight,
                                       progress=progress,
                                       baseOff=baseOff,
-                                      rate=baseRate)
+                                      rate=baseRate,idPeak=idPeak)
     if plot:
         plot_corr(offsets,tau,corrs)
     peakOffID = np.argmax(np.abs(corrs).max(0))
@@ -142,7 +172,7 @@ def find_rate_dm(station0,station1,baseDelay,baseRate,
                                       weight=weight,
                                       progress=False,
                                       baseOff=peakOff,
-                                      rate=rate)
+                                      rate=rate,idPeak=idPeak)
         ift = np.fft.ifft(np.fft.ifftshift(corrs[:,0]))
         corrected = corrections*ift
         corrs2 = np.fft.fftshift(np.fft.fft(corrected,axis=1),axes=1)
@@ -159,8 +189,8 @@ def find_rate_dm(station0,station1,baseDelay,baseRate,
         w0 = (x.max()-x.min())/4
         t00 = x[y==y.max()].mean()
         poptR,pcovR=curve_fit(gau1,x,y,p0=np.array([A0,t00,w0,N0]))
-        rate = poptR[2]*rates.unit
-        rateError = np.sqrt(pcovR[2,2])*rates.unit
+        rate = poptR[1]*rates.unit
+        rateError = np.sqrt(pcovR[1,1])*rates.unit
         x = np.copy(dDMs).value
         y = peaks.max(1)
         N0 = y.min()
@@ -168,8 +198,8 @@ def find_rate_dm(station0,station1,baseDelay,baseRate,
         w0 = (x.max()-x.min())/4
         t00 = x[y==y.max()].mean()
         poptD,pcovD=curve_fit(gau1,x,y,p0=np.array([A0,t00,w0,N0]))
-        dDM = poptD[2]*dDMs.unit
-        dDMError = np.sqrt(pcovD[2,2])*dDMs.unit
+        dDM = poptD[1]*dDMs.unit
+        dDMError = np.sqrt(pcovD[1,1])*dDMs.unit
         tauErr = 1.25*u.ns
     else:
         if peaks.min()<peaks.max()-1:

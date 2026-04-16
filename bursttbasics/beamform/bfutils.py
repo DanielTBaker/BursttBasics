@@ -95,7 +95,7 @@ def in_beam_test(srce,time,findClosest=False,plot=True):
     aas = srce.transform_to(aaFrame)
     codeDir = os.path.dirname(os.path.realpath(__file__))
     beamFile = 'beams_altaz_fus_16x16_b-7.5_-7.5_flim400_800_rot-3.0_sky400x700_ew-60_60_ns-70_70_att30n60_cal251027.npy'
-    beamBounds = np.load(os.path.join(codeDir,beamFile), allow_pickle=True).item()
+    beamBounds = np.load(os.path.join(codeDir,'..',beamFile), allow_pickle=True).item()
     minCross=np.inf
     minBeam = 0
     for k in range(len(beamBounds)):
@@ -189,21 +189,6 @@ def transfer_data(transfer,station):
             targetDir = f'/burstt_home/shared/dbaker/{source.lower()}'
             destination = f'ubuntu@{targetIP}:{targetDir}'
             command = ["rsync", "-avh", '--info=progress2', '--remove-source-files'] + transfer[source] + [destination, f'--bwlimit={bwLimit}']
-            # if station.stationID == 'GRN':
-            #     with open('transfers.txt','a') as f:
-            #         f.write(' '.join(command))
-            #         f.write('\n')
-            #     total,used,free = shutil.disk_usage(station.saveDir)
-            #     free = free/(2**30)
-            #     loops=0
-            #     while free<30:
-            #         if loops>12:
-            #             raise Exception(f'Insufficent Space in {station.saveDir}')
-            #         sleep(60*30)
-            #         total,used,free = shutil.disk_usage(station.saveDir)
-            #         free = free/(2**30)
-            #         loops+=1
-            # else:
             print(f'Start transfer of {len(transfer[source])} {source} files')
             process = subprocess.Popen(command,
                                         stdout=subprocess.PIPE,

@@ -6,7 +6,6 @@ import numpy as np
 from .packet_func import *
 from .burstt_const import *
 from tqdm.notebook import tqdm
-import scintools.ththmod as thth
 
 def gau1(x,A,x0,s,C):
     """ A simple 1D gaussian.
@@ -159,12 +158,55 @@ def unwrap(y,hatLength=100):
         yOut[(yOut-smoothedAngs)<-np.pi] +=2*np.pi
     return(yOut)
 
+def fft_axis(x, unit, pad=0):
+    """
+    Calculates fourier space coordinates from data space coordinates.
+
+    Parameters
+    ----------
+    x : `~astropy.units.Quantity`
+        Coordinate array to find Fourier conjugate of
+    unit : `~astropy.units.Unit`
+        Desired unit for fourier coordinates
+    pad : int, optional
+        Integer giving how many additional copies of the data are padded in
+        this direction
+    """
+    fx = (
+        np.fft.fftshift(
+            np.fft.fftfreq((pad + 1) * x.shape[0], x[1] - x[0]).to_value(unit)
+        )
+        * unit
+    )
+    return fx
+
+def ext_find(x, y):
+    """
+    Determine extent for imshow to center bins at given coordinates
+
+    Parameters
+    ----------
+    x : `~astropy.units.Quantity`
+        X coordinates of data
+    y : `~astropy.units.Quantity`
+        Y coordiantes of data
+
+    """
+    dx = np.diff(x).mean()
+    dy = np.diff(y).mean()
+    ext = [
+        (x[0] - dx / 2).value,
+        (x[-1] + dx / 2).value,
+        (y[0] - dy / 2).value,
+        (y[-1] + dy / 2).value,
+    ]
+    return ext
 
 def shiftArr(arr,x,xExpected,coher = False):
     if coher:
         Farr = np.fft.fftshift(np.fft.fft(arr,axis=1),axes=1)
-        fx = thth.fft_axis(x,1/x.unit)
-        x2 =thth.fft_axis(fx,x.unit)
+        fx = fft_axis(x,1/x.unit)
+        x2 = fft_axis(fx,x.unit)
         Farr*=np.exp(1j*2*np.pi*((xExpected[:,np.newaxis]-x[0])*fx[np.newaxis,:]).to(u.dimensionless_unscaled))
         shiftedArr = np.fft.fftshift(np.fft.ifft(np.fft.ifftshift(Farr,axes=1),axis=1).real,axes=1)
     else:

@@ -1,0 +1,10 @@
+numpy
+matplotlib
+astropy
+tqdm
+scipy
+braceexpand
+pint-pulsar
+pandas
+ipywidgets
+git+https://github.com/aelanman/pycalc11.git

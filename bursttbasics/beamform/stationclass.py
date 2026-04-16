@@ -29,7 +29,7 @@ class Station:
                  orderOff = 0,
                  fpp = 4,fl2int = 256,beamform = bf.beamform256,calib = 'calibration',skipRows = [],
                  targetIP = '140.109.178.116',
-                 stationID = 'STN',bwLimit=30,saveDir='./'
+                 stationID = 'STN',bwLimit=30,saveDir='./',calFormat='.txt'
                 ):
         
         self.set_cal_options(calib)
@@ -59,7 +59,7 @@ class Station:
         self.targetIP = targetIP
         self.stationID = stationID
         self.bwLimit = bwLimit
-        self.calFormat='.txt'
+        self.calFormat=calFormat
         self.saveDir = saveDir
         
     def set_cal_options(self,calDir,verbose=False):
@@ -753,7 +753,7 @@ class Station:
             calib = config['Format'].get('calFolder','calibration'),
             targetIP = config['General'].get('TargetIP','140.109.178.116'),
             stationID = config['General'].get('stationID','STN'),bwLimit=config['General'].getint('bwLimit',1),
-            saveDir=config['General'].get('saveDir','./')
+            saveDir=config['General'].get('saveDir','./'),calFormat=config['Format'].get('calFormat','.txt')
                 ))
         
         

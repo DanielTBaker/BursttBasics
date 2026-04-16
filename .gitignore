@@ -1,3 +1,4 @@
 *.sh
 .vscode
 .vscode/*
+*.DS*
