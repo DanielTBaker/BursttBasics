@@ -469,10 +469,12 @@ class Stream:
                     spec[:,order*self.nChan:(order+1)*self.nChan] = orderSpec[:nFrames]
                         
                     # print(f'Dedisperse in {(Time.now()-ts).to_value(u.min):.1f} minutes',flush=True)
-            return(spec,tStart)
+            ep0 = t0 + self.time_to_frames((tStartDispersed.unix*u.s-t0))*self.frameSec.to_value(u.s)
+            return(spec,ep0)
         except Exception as e:
             print(f'In read_around_dedis({sys.exc_info()[2].tb_lineno}): {e}',flush=True)
-            return(spec*np.nan,tStart)
+            ep0 = t0 + self.time_to_frames((tStartDispersed.unix*u.s-t0))*self.frameSec.to_value(u.s)
+            return(spec*np.nan,ep0)
 
     def _pulsar_prep(self,config):
         self.ToAs = []

@@ -6,6 +6,8 @@ import astropy.units as u
 import astropy.constants as const
 from astropy.time import Time
 from scipy.optimize import curve_fit
+from ..trigger.dumpclass import StationDump
+from ..trigger.correlator import correlate_dump,find_rate_dm
 
 
 class SinglePulseProcess(Process):
@@ -73,12 +75,12 @@ class SinglePulseProcess(Process):
         self.specs = []
         self.Is = []
         self.var = []
-        self.tStarts = []
+        self.ep0s = []
         for obs in self.observations:
-            spec,tStart = obs.read_around_dedis(*x)
+            spec,ep0s = obs.read_around_dedis(*x)
             self.var.append(spec.var(0))
             self.Is.append(np.ma.array(np.reshape(np.abs(spec[:400*(spec.shape[0]//400)])**2,(-1,400,spec.shape[1])).mean(1),mask=False))
-            self.tStarts.append(tStart) 
+            self.ep0s.append(ep0s) 
             self.specs.append(np.ma.array(spec,mask=False))
             # print(spec.shape)
         self.back_pipe.send(['data loaded',self.Is,self.var])

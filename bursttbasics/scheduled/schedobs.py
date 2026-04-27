@@ -248,6 +248,7 @@ class Observation:
         )
         ci.run_driver()
         delayVLBI = ci.interpolate_delays(times)[:,:,:,0]
+        rates = ci.delay_rate[:,0,1,0]
         allDelays = np.concatenate([(delayVLBI[:,i,i+1:].T) for i in range(delayVLBI.shape[1])],axis=0)
         return(allDelays)
 
@@ -381,9 +382,9 @@ class Observation:
                         poptT = np.array([A0,plotTime.mean().to_value(u.us),s0,C0])
                     tProf = gau1(plotTime.to_value(u.us),*poptT[:-1],0)
                     y2=((I[streamID]-poptT[-1])*tProf[:,np.newaxis]).sum(0)/np.sum(tProf)
-                    p0 = [y2[0]/np.power(stream.freq[0].to_value(u.MHz),-2),-2]
+                    p0 = [y2[0]/np.power(stream.freq[0].to_value(u.MHz)/400,-2),-2,0]
                     try:
-                        poptF,pcovF = curve_fit(power,np.reshape(stream.freq,(I[streamID].shape[1],-1)).mean(1)[:25].to_value(u.MHz),y2[:25],p0=p0,maxfev=10000)
+                        poptF,pcovF = curve_fit(frequency_model,np.reshape(stream.freq,(I[streamID].shape[1],-1)).mean(1)[:25].to_value(u.MHz),y2[:25],p0=p0,maxfev=10000)
                     except:
                         poptF = p0
                     model = power(np.reshape(stream.freq,(I[streamID].shape[1],-1)).mean(1)[:25].to_value(u.MHz),*poptF)[:,np.newaxis]*tProf
@@ -402,7 +403,7 @@ class Observation:
                     plt.xlim(ext[:2])
                     plt.subplot(grid[:3,-1])
                     plt.plot(y2,np.reshape(stream.freq,(I[streamID].shape[1],-1)).mean(1).to_value(u.MHz))
-                    plt.plot(power(np.reshape(stream.freq,(I[streamID].shape[1],-1)).mean(1).to_value(u.MHz),*poptF),np.reshape(stream.freq,(I[streamID].shape[1],-1)).mean(1).to_value(u.MHz))
+                    plt.plot(frequency_model(np.reshape(stream.freq,(I[streamID].shape[1],-1)).mean(1).to_value(u.MHz),*poptF),np.reshape(stream.freq,(I[streamID].shape[1],-1)).mean(1).to_value(u.MHz))
                     plt.xlabel('I')
                     plt.tight_layout()
                     plt.savefig(os.path.join(self.plotDir,f'BURSTT_{self.sourceName}_{self.obsDate}_{groupID}_{stream.name}_model_{self.config["Correlating"].get("dedisperse")}.png'))

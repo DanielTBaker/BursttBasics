@@ -168,7 +168,7 @@ class StationDump:
         Plot intensity as well as time and frequency SNR
         """
         I = np.abs(self.spec)**2
-        I2 = np.nanmean(np.reshape(I[:,:rbt*(I.shape[1]//rbt)],(1024,-1,rbt)),2)
+        I2 = np.nanmean(np.reshape(I[:,:rbt*(I.shape[1]//rbt)],(self.spec.shape[0],-1,rbt)),2)
         t2 = np.reshape(self.time[:rbt*I2.shape[1]],(-1,rbt)).mean(1)
         f2 = np.reshape(self.freq,(-1,rbf)).mean(1)
         SNR,on = self.calc_SNR(t2,I2,freqMin=freqMin,freqMax=freqMax)
@@ -183,7 +183,7 @@ class StationDump:
             wts/=np.nansum(wts)
             SNRF = self.calc_spec(I2,wts,noiseSub=True)
         
-        I2 = np.nanmean(np.reshape(I2,(1024//rbf,rbf,-1)),1)
+        I2 = np.nanmean(np.reshape(I2,(self.spec.shape[0]//rbf,rbf,-1)),1)
         ext = ext_find(t2.to(u.ms),f2)
         grid=plt.GridSpec(nrows=2,ncols=2,height_ratios=[1,4],width_ratios=[4,1],wspace=0,hspace=0)
         plt.figure(figsize=(8,8))
