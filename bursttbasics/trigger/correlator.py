@@ -116,9 +116,93 @@ def correlate_dump(s0,s1,
         tRef = Time(s0.ep0,format='unix')+idPeak*sampleTime
     return(offsets,tau,corrs,startResidual,tRef)
 
+def rate_dm_peaks(station0,station1,baseDelay,baseRate,
+                width=2048,weight=True,idPeak=None,mean=False,maxOff=20,
+                 searchRange=1e-6*u.s*u.Hz,nRate=61,
+                 dDMRange=1e-5*u.pc/u.cm**3,dDMFitRange=0,nDMs=1001,
+                 progress=False,line=False):
+    dmSlope = -station0.DM
+    fOverlap = get_f_overlap(station0,station1)
+    baseOff = int((baseDelay//(2.56*u.us)).to_value(u.dimensionless_unscaled))
+    offsets,tau,corrs,startResidual,tRef =correlate_dump(station0,station1,
+                                      maxOff=maxOff,width=width,
+                                      weight=weight,
+                                      progress=progress,
+                                      baseOff=baseOff,
+                                      rate=baseRate,idPeak=idPeak,mean=mean)
+    peakOffID = np.argmax(np.abs(corrs).max(0))
+    peakOff = offsets[peakOffID]
+    ift = np.fft.ifft(np.fft.ifftshift(corrs[:,peakOffID]))
+    dDMs = np.linspace(-dDMRange,dDMRange,nDMs)<<u.pc/u.cm**3
+    delays = (dDMs[:,np.newaxis]/K)/fOverlap[np.newaxis,:]**2
+    corrections = np.exp(-1j*2*np.pi*(delays*fOverlap[np.newaxis,:]).to_value(u.dimensionless_unscaled))
+    corrected = corrections*ift
+    corrs2 = np.fft.fftshift(np.fft.fft(corrected,axis=1),axes=1)
+    dDMref = dDMs[np.argmax(np.max(np.abs(corrs2),1))]
+    
+    rates=baseRate+np.linspace(-1,1,nRate)*searchRange
+    if dDMFitRange>0:
+        dDMs = (np.linspace(-1,1,nDMs)*dDMFitRange << (u.pc/u.cm**3))+dDMref
+    if line:
+        dDMs-=dmSlope*baseRate
+    # else:
+    #     # dDMs = np.sort((np.linspace(rates.min(),rates.max(),nDMs)-baseRate)*dmSlope + dDMref)
+
+    delays = (dDMs[:,np.newaxis]/K)/fOverlap[np.newaxis,:]**2
+    corrections = np.exp(-1j*2*np.pi*(delays*fOverlap[np.newaxis,:]).to_value(u.dimensionless_unscaled))
+    peaks = np.zeros((dDMs.shape[0],rates.shape[0]))
+    # taus = np.zeros((dDMs.shape[0],rates.shape[0]))*u.ns
+    iterator = enumerate(rates)
+    if progress:
+        iterator = tqdm(iterator,total=rates.shape[0])
+    for i,rate in iterator:
+        offsets,tau,corrs,startResidual,tRef = correlate_dump(station0,station1,
+                                      maxOff=0,width=width,
+                                      weight=weight,
+                                      progress=False,
+                                      baseOff=peakOff,
+                                      rate=rate,idPeak=idPeak,mean=mean)
+        
+        ift = np.fft.ifft(np.fft.ifftshift(corrs[:,0]))
+        corrected = corrections*ift
+        if line:
+            dDMoff = dmSlope*rate
+            corrected*=np.exp(-1j*2*np.pi*((dDMoff/K)/fOverlap[np.newaxis,:]).to(u.dimensionless_unscaled))
+        corrs2 = np.fft.fftshift(np.fft.fft(corrected,axis=1),axes=1)
+        peaks[:,i]=np.abs(corrs2).max(1)**2
+        # taus[:,i]=tau[np.argmax(np.abs(corrs2),1)]
+    return(peaks,dDMs,rates,peakOff)
+
+
+def fit_rate_dm(peaks,dDMs,rates):
+    x = np.copy(rates).value
+    y = peaks.max(0)
+    N0 = y.min()
+    A0 = y.max()-N0
+    w0 = (x.max()-x.min())/4
+    t00 = x[y==y.max()].mean()
+    poptR,pcovR=curve_fit(gau1,x,y,p0=np.array([A0,t00,w0,N0]))
+    # wts=gau1(x,*poptR)
+    # wts/=np.sum(wts)
+    rate = poptR[1]*rates.unit
+    rateError = np.sqrt(pcovR[1,1])*rates.unit
+    x = np.copy(dDMs).value
+    # y = np.sum(peaks*wts,1)
+    y = peaks.max(1)
+    N0 = y.min()
+    A0 = y.max()-N0
+    w0 = (x.max()-x.min())/4
+    t00 = x[y==y.max()].mean()
+    poptD,pcovD=curve_fit(gau1,x,y,p0=np.array([A0,t00,w0,N0]))
+    if poptD[0]+poptD[-1] < y.max()*.95:
+        width = max(2*poptD[2],np.abs(poptD[1]-t00))
+        poptD,pcovD=curve_fit(gau1,x[np.abs(x-poptD[1])<width],y[np.abs(x-poptD[1])<width],p0=poptD)
+        poptD,pcovD=curve_fit(gau1,x[np.abs(x-poptD[1])<width],y[np.abs(x-poptD[1])<width],p0=poptD)
+    return(poptR,poptD)
+
 
 def find_rate_dm(station0,station1,baseDelay,baseRate,
-                 searchFrac=.1,maxOff=20,dDMRange=1e-5*u.pc/u.cm**3,dDMFitRange=0,
+                 searchRange=1e-6*u.s*u.Hz,maxOff=20,dDMRange=1e-5*u.pc/u.cm**3,dDMFitRange=0,
                  plot=False,progress=False,nRate=61,nDMs=1001,width=2048,weight=True,idPeak=None,gauFit = False,showPrediction=True,mean=False,line=False):
     """ 
     Search for dDM and rate that maximize correlation amplitude
@@ -139,127 +223,28 @@ def find_rate_dm(station0,station1,baseDelay,baseRate,
         fraction of baseRate to search on either side (searchFrac=1 -> seach from 0 to 2*baseRate)    
 
     """
-    dmSlope = -station0.DM
-    fOverlap = get_f_overlap(station0,station1)
-    baseOff = int((baseDelay//(2.56*u.us)).to_value(u.dimensionless_unscaled))
-    offsets,tau,corrs,startResidual,tRef =correlate_dump(station0,station1,
-                                      maxOff=maxOff,width=width,
-                                      weight=weight,
-                                      progress=progress,
-                                      baseOff=baseOff,
-                                      rate=baseRate,idPeak=idPeak,mean=mean)
-    if plot:
-        plot_corr(offsets,tau,corrs)
-    peakOffID = np.argmax(np.abs(corrs).max(0))
-    peakOff = offsets[peakOffID]
-    ift = np.fft.ifft(np.fft.ifftshift(corrs[:,peakOffID]))
-    dDMs = np.linspace(-dDMRange,dDMRange,nDMs)<<u.pc/u.cm**3
-    delays = (dDMs[:,np.newaxis]/K)/fOverlap[np.newaxis,:]**2
-    corrections = np.exp(-1j*2*np.pi*(delays*fOverlap[np.newaxis,:]).to_value(u.dimensionless_unscaled))
-    corrected = corrections*ift
-    corrs2 = np.fft.fftshift(np.fft.fft(corrected,axis=1),axes=1)
-    dDMref = dDMs[np.argmax(np.max(np.abs(corrs2),1))]
-    
-    rates=np.sort(np.linspace((1-searchFrac)*baseRate,(1+searchFrac)*baseRate,nRate))
-    if dDMFitRange>0:
-        dDMs = (np.linspace(-1,1,nDMs)*dDMFitRange << (u.pc/u.cm**3))+dDMref
+    peaks,dDMs,rates,peakOff = rate_dm_peaks(station0,station1,baseDelay,baseRate,
+                width,weight,idPeak,mean,maxOff,
+                 searchRange,nRate,
+                 dDMRange,dDMFitRange,nDMs,
+                 progress,line)
+    offset = peakOff*2.56*u.us
+    poptR,poptD = fit_rate_dm(peaks,dDMs,rates)
+    dDM = poptD[1]*u.pc/u.cm**3
+    rate = poptR[1]*u.s*u.Hz
     if line:
-        dDMs-=dmSlope*baseRate
-    # else:
-    #     # dDMs = np.sort((np.linspace(rates.min(),rates.max(),nDMs)-baseRate)*dmSlope + dDMref)
-
-    delays = (dDMs[:,np.newaxis]/K)/fOverlap[np.newaxis,:]**2
-    corrections = np.exp(-1j*2*np.pi*(delays*fOverlap[np.newaxis,:]).to_value(u.dimensionless_unscaled))
-    peaks = np.zeros((dDMs.shape[0],rates.shape[0]))
-    taus = np.zeros((dDMs.shape[0],rates.shape[0]))*u.ns
-    iterator = enumerate(rates)
-    if progress:
-        iterator = tqdm(iterator,total=rates.shape[0])
-    for i,rate in iterator:
-        offsets,tau,corrs,startResidual,tRef = correlate_dump(station0,station1,
+        dDM-=station0.DM*rate
+    offsets,taus,corrs,startResidual,tRef = correlate_dump(station0,station1,
                                       maxOff=0,width=width,
                                       weight=weight,
                                       progress=False,
                                       baseOff=peakOff,
-                                      rate=rate,idPeak=idPeak,mean=mean)
-        
-        ift = np.fft.ifft(np.fft.ifftshift(corrs[:,0]))
-        corrected = corrections*ift
-        if line:
-            dDMoff = dmSlope*rate
-            corrected*=np.exp(-1j*2*np.pi*((dDMoff/K)/fOverlap[np.newaxis,:]).to(u.dimensionless_unscaled))
-        corrs2 = np.fft.fftshift(np.fft.fft(corrected,axis=1),axes=1)
-        peaks[:,i]=np.abs(corrs2).max(1)**2
-        taus[:,i]=tau[np.argmax(np.abs(corrs2),1)]
-    rate = rates[np.argmax(peaks.max(0))]
-    dDM = dDMs[np.argmax(peaks.max(1))]
-    tau = taus[peaks==peaks.max()].mean()
-    if gauFit:
-        x = np.copy(rates).value
-        y = peaks.max(0)
-        N0 = y.min()
-        A0 = y.max()-N0
-        w0 = (x.max()-x.min())/4
-        t00 = x[y==y.max()].mean()
-        poptR,pcovR=curve_fit(gau1,x,y,p0=np.array([A0,t00,w0,N0]))
-        rate = poptR[1]*rates.unit
-        rateError = np.sqrt(pcovR[1,1])*rates.unit
-        x = np.copy(dDMs).value
-        y = peaks.max(1)
-        N0 = y.min()
-        A0 = y.max()-N0
-        w0 = (x.max()-x.min())/4
-        t00 = x[y==y.max()].mean()
-        poptD,pcovD=curve_fit(gau1,x,y,p0=np.array([A0,t00,w0,N0]))
-        dDM = poptD[1]*dDMs.unit
-        dDMError = np.sqrt(pcovD[1,1])*dDMs.unit
-        tauErr = 1.25*u.ns
-    else:
-        if peaks.min()<peaks.max()-1:
-            rateError = np.abs(rates[peaks.max(0)>=peaks.max()-1]-rate).max()
-            dDMError = np.abs(dDMs[peaks.max(1)>=peaks.max()-1]-dDM).max()
-            tauErr = np.abs(taus[peaks>=peaks.max()-1]-tau).max()
-        else:
-            rateError = np.nan*u.s*u.Hz
-            dDMError = np.nan*u.pc/u.cm**3
-            tauErr=np.nan*u.ns
-    peakSNR = peaks.max()
-    if plot:
-        
-        grid=plt.GridSpec(nrows=2,ncols=2,
-                          width_ratios=[4,1],height_ratios=[1,4],
-                          hspace=0,wspace=0)
-        ext=ext_find(rates,dDMs)
-        plt.figure()
-        plt.subplot(grid[1,0])
-        plt.imshow(peaks,origin='lower',aspect='auto',extent=ext)
-        plt.contour(rates.value,dDMs.value,peaks,[peaks.max()-2,peaks.max()-1],colors=['red','red'])
-        if showPrediction and not line:
-            plt.plot(rates,(rates-rate)*dmSlope + dDM,'r')
-        plt.ylim(ext[2:])
-        plt.xlabel(r'$\rm{Rate}~\left(\rm{s}~\rm{Hz}\right)$')
-        if line:
-            plt.ylabel(r'$\Delta\rm{DM}_0~\left(\rm{pc}~\rm{cm}^{-3}\right)$')
-        else:
-            plt.ylabel(r'$\Delta\rm{DM}~\left(\rm{pc}~\rm{cm}^{-3}\right)$')
-        plt.subplot(grid[0,0])
-        plt.plot(rates,peaks.max(0))
-        plt.xticks([])
-        plt.xlim(ext[:2])
-        plt.ylabel('Peak SNR')
-        if gauFit:
-            plt.plot(rates,gau1(rates.value,*poptR))
-        plt.subplot(grid[1,1])
-        plt.plot(peaks.max(1),dDMs)
-        if gauFit:
-            plt.plot(gau1(dDMs.value,*poptD),dDMs)
-        plt.yticks([])
-        plt.xlabel('Peak SNR')
-        plt.ylim(ext[2:])
-        plt.show()
-    offset = peakOff*2.56*u.us
-    if line:
-        dDM+=dmSlope*rate
+                                      rate=rate,idPeak=idPeak,mean=mean,dDM=dDM)
+    
+    peakSNR = np.abs(corrs).max()**2
+    tau = taus[np.abs(corrs[:,0])==np.abs(corrs[:,0])].mean()
+    tauErr = (taus[1]-taus[0])/2
+    
     return(dDM,dDMError,rate,rateError,tau,tauErr,peakSNR,offset,startResidual)
 
 

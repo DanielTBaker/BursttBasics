@@ -198,8 +198,9 @@ def transfer_data(transfer,station):
                 # iter(lambda: ...) reads the output character by character or line by line
                 for line in iter(process.stdout.readline, ""):
                     # Display the raw progress line from rsync
-                    sys.stdout.write(f"\r{line.strip()}")
-                    sys.stdout.flush()
+                    if '%' in line:
+                        sys.stdout.write(f"\r{line.strip()}"+"\x1b[K")
+                        sys.stdout.flush()
             finally:
                 process.stdout.close()
                 return_code = process.wait()
