@@ -195,9 +195,15 @@ def fit_rate_dm(peaks,dDMs,rates):
     t00 = x[y==y.max()].mean()
     poptD,pcovD=curve_fit(gau1,x,y,p0=np.array([A0,t00,w0,N0]))
     if poptD[0]+poptD[-1] < y.max()*.95:
-        width = max(2*poptD[2],np.abs(poptD[1]-t00))
-        poptD,pcovD=curve_fit(gau1,x[np.abs(x-poptD[1])<width],y[np.abs(x-poptD[1])<width],p0=poptD)
-        poptD,pcovD=curve_fit(gau1,x[np.abs(x-poptD[1])<width],y[np.abs(x-poptD[1])<width],p0=poptD)
+        width = max(2*np.abs(poptD[2]),np.abs(poptD[1]-t00),10*(x[1]-x[0]))
+        poptD,pcovD=curve_fit(gau1,x[np.abs(x-t00)<width],y[np.abs(x-t00)<width],p0=poptD)
+        err = (y[np.abs(x-t00)<width]-gau1(x[np.abs(x-t00)<width],*poptD)).std()
+        poptD,pcovD=curve_fit(gau1,x[np.abs(x-t00)<width],y[np.abs(x-t00)<width],p0=poptD,sigma=err,absolute_sigma=True)
+    else:
+        err = (y-gau1(x,*poptD)).std()
+        poptD,pcovD=curve_fit(gau1,x,y,p0=poptD,sigma=err,absolute_sigma=True)
+        
+        
     return(poptR,poptD)
 
 
