@@ -7,6 +7,7 @@ from astropy.time import Time
 from astropy.coordinates import SkyCoord
 from ..packet_func import *
 from .stationclass import Station
+import shutil
 
 class BeamFormer(widgets.Tab):
     def __init__(self,config,**kwargs):
@@ -484,6 +485,8 @@ class StationProperties(widgets.GridspecLayout):
         self.saveDir.value = conf['General'].get('saveDir','./')
 
 
+
+
 class BeamFormerRun(widgets.VBox):
     def __init__(self,station,**kwargs):
         super().__init__(**kwargs)
@@ -513,21 +516,25 @@ class BeamFormerRun(widgets.VBox):
         self.baseRebin = widgets.IntText(value=400,min=1,description='Time Rebin',layout=widgets.Layout(width='25ch'))
         self.baseSourceType = widgets.Dropdown(description='Source Type:',options=['Beam','Target'],value='Beam')
         self.baseSourceType.observe(self.update_base_source,names='value')
+        self.yOffset = widgets.FloatText(description='Y Offset:',value=0,layout=widgets.Layout(width='25ch'))
         self.baseBeamTest = widgets.Button(description='Test Beam',layout=widgets.Layout(width='25ch'))
         self.baseBeamTest.on_click(self.test_beam)
         self.baseTargetName = widgets.Combobox(description='Target:',options=['B0531+21','B0329+54','3C147','3C48','3C273'])
         self.baseTargetName.observe(self.base_target_change,names='value')
-        self.firstOnly = widgets.Checkbox(description = 'First Beamform')
+        self.firstOnly = widgets.Checkbox(description = 'First Beamform (Column)')
+        self.allFirst = widgets.Checkbox(description = 'All First')
         self.skipOrders = widgets.IntsInput()
         self.baseBox[0,0]=self.baseDM
         self.baseBox[0,1]=self.baseSecWin
         self.baseBox[0,2]=self.baseTimeOff
-        self.baseBox[1,:]=self.baseSourceType
+        self.baseBox[1,0]=self.baseSourceType
+        self.baseBox[1,1]=self.yOffset
         self.baseBox[2,1]=self.baseBeam
         self.baseBox[3,:]=widgets.Label('Skip Orders:')
         self.baseBox[4,:]=self.skipOrders
         self.baseBox[5,0]=self.firstOnly
-        self.baseBox[5,1]=self.baseRun
+        self.baseBox[5,1]=self.allFirst
+        self.baseBox[5,2]=self.baseRun
         self.baseTab.children = [self.baseBox,self.baseOut]
         self.baseRun.on_click(self.run_base)
 
@@ -727,14 +734,44 @@ class BeamFormerRun(widgets.VBox):
                     except:
                         print('Source Not Found')
                         return
-            if self.firstOnly.value:
+            if self.allFirst.value:
+                transfer = {}
+                transfer.update({'jacob':[]})
+                for beamIDX in range(self.station.nAnt):
+                    for beamIDY in range(self.station.nRow):
+                        ddSpec,ep0,beamIDX,beamIDY,hasData = self.station.beamform_event_first(self.eventFiles,beamIDX,beamIDY,
+                                                                self.baseDM.value,self.ep0.value,
+                                                                secWin = self.baseSecWin.value*u.s,
+                                                                timeOffset = self.baseTimeOff.value*u.s,
+                                                                skipOrder = self.skipOrders.value
+                                                                )
+                        if hasData:
+                            _total,_used,free = shutil.disk_usage(self.station.saveDir)
+                            free = free/(2**30)
+                            if free<10:
+                                transfer_data(transfer,self.station)
+                                _total,_used,free = shutil.disk_usage(self.station.saveDir)
+                                free = free/(2**30)
+                                if free<10:
+                                    raise Exception(f'Insufficent Space in {self.station.saveDir}')
+                                transfer.update({'jacob':[]})
+                            ddTime = np.arange(ddSpec.shape[1])*self.station.timeFrame # time offset of each frame
+                            out_name = f'baseband_first_dedisperse_{self.station.stationID}_{self.eventID.value}_{beamIDX}_{beamIDY}.npz'
+                            np.savez(os.path.join(self.station.saveDir,out_name), freq=self.station.freq, ep0=ep0,
+                                    dd_time=ddTime, dd_spec=ddSpec, ep_event=self.ep0.value,
+                                    DM=self.baseDM.value, beamid_x=beamIDX, beamid_y=beamIDY)
+                            transfer['jacob'].append(os.path.join(self.station.saveDir,out_name))
+                transfer_data(transfer,self.station)
+            elif self.firstOnly.value:
                 self.baseOut.clear_output()
                 beamIDX,sinThetaIDY,_ =  self.station.beamIDs_from_FUS(targetBeam)
                 for beamIDY in range(self.station.nRow):
                     ddSpec,ep0,beamIDX,beamIDY,hasData = self.station.beamform_event_first(self.eventFiles,beamIDX,beamIDY,
                                                             self.baseDM.value,self.ep0.value,
                                                             secWin = self.baseSecWin.value*u.s,
-                                                                timeOffset = self.baseTimeOff.value*u.s,skipOrder = self.skipOrders.value)
+                                                            timeOffset = self.baseTimeOff.value*u.s,
+                                                            skipOrder = self.skipOrders.value
+                                                            )
                     if hasData:
                         ddTime = np.arange(ddSpec.shape[1])*self.station.timeFrame # time offset of each frame
                         out_name = f'baseband_first_dedisperse_{self.station.stationID}_{self.eventID.value}_{beamIDX}_{beamIDY}.npz'
@@ -751,7 +788,10 @@ class BeamFormerRun(widgets.VBox):
                 ddSpec,ep0,beamIDX,beamIDY,hasData = self.station.beamform_event(self.eventFiles,targetBeam,
                                                             self.baseDM.value,self.ep0.value,
                                                             secWin = self.baseSecWin.value*u.s,
-                                                                timeOffset = self.baseTimeOff.value*u.s,skipOrder = self.skipOrders.value)
+                                                            timeOffset = self.baseTimeOff.value*u.s,
+                                                            skipOrder = self.skipOrders.value,
+                                                            thetaYOff = self.yOffset.value*u.deg
+                                                            )
                 self.baseOut.clear_output()
                 if hasData:
                     ddTime = np.arange(ddSpec.shape[1])*self.station.timeFrame # time offset of each frame

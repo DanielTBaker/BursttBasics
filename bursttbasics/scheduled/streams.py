@@ -228,7 +228,7 @@ class Stream:
         self.blockStart = np.zeros((len(self.fbystamp),self.nBlock,self.nf))*np.inf*u.s
         self.nEpochs = 0
 
-    def get_block_from_time(self,time):
+    def get_block_from_time(self,time,order=0):
         """Determine epoch and block number containing a given time.
 
         Parameters
@@ -249,14 +249,18 @@ class Stream:
             tRef = time.to_value('unix')*u.s
         else:
             tRef = self.epoch0.to_value('unix')*u.s + time
-        if tRef>np.nanmax(self.blockStart):
-            return(self.nEpochs-1,self.nf*self.nBlock -1)
+
+        ordered = np.reshape(self.blockStart[order*self.nEpochs:(order+1)*self.nEpochs],(-1))
+        if tRef>np.nanmax(self.blockStart+self.blockFrame*self.frameSec):
+            return(self.nEpochs-1,self.nf*self.nBlock -1,False)
         if tRef<np.nanmin(self.blockStart):
-            return(0,0)
-        epochStarts = self.blockStart[:self.nEpochs,0,0]
-        epoch = epochStarts[epochStarts<tRef].shape[0]-1
-        block = self.blockStart[epoch][self.blockStart[epoch]<tRef].shape[0]-1
-        return(epoch,block)
+            return(0,0,False)
+        
+        idx = np.argwhere(ordered<=tRef).max()
+        epoch = idx//(self.nBlock*self.nf)
+        block = np.mod(idx,self.nBlock*self.nf)
+        inBlock = (tRef - ordered[idx])<(self.blockFrame*self.frameSec)
+        return(epoch,block,inBlock)
 
     def load_chain(self,order,segment,verbose=False):
         try:
@@ -338,23 +342,47 @@ class Stream:
         if verbose:
             print(f'Read from {tStart} to {tEnd}')
         nFrames = self.time_to_frames(2*tWidth)
-        e0,b0 = self.get_block_from_time(tStart)
-        e1,b1 = self.get_block_from_time(tEnd)
+        
         if verbose:
             print(f'Starting: ({e0,b0})')
             print(f'Ending: ({e1,b1})')
-        t0 = self.blockStart[e0,b0//self.nf,np.mod(b0,self.nf)]
+        
         spec = self.basic_spec(self.nChan0,nFrames)
         if verbose:
             print(f'Spec Shape: {spec.shape}')
         try:
             for order in range(self.nOrder):
-                pxStart = self.time_to_frames(tStart.unix*u.s-t0)
-                orderSpec = self.read_order(e0,b0,(e1-e0)*self.nf*self.nBlock + b1-b0+1,order)
-                spec[:,order*self.nChan:(order+1)*self.nChan]=orderSpec[pxStart:pxStart+nFrames]
+                orderTime0 = tStart+0*u.s
+                orderTime1 = tEnd+0*u.s
+                ordered = np.reshape(self.blockStart[order*self.nEpochs:(order+1)*self.nEpochs],(-1))
+                e0,b0,in0 = self.get_block_from_time(orderTime0,order)
+                e1,b1,in1 = self.get_block_from_time(orderTime1,order)
+                while (not in0) or (not in1):
+                    print('Gap')
+                    if not in0:
+                        if e0*(self.nBlock*self.nf)+b0+1>=ordered.shape[0]:
+                            break
+                        offset = ordered[e0*(self.nBlock*self.nf)+b0+1]-orderTime0
+                        orderTime0+=offset
+                    if not in1:
+                        if e1*(self.nBlock*self.nf)+b1-1<0:
+                            break
+                        offset = ordered[e1*(self.nBlock*self.nf)+b1]-self.frameSec-orderTime1
+                        orderTime1+=offset
+                    if orderTime0>orderTime1:
+                        break
+                    if not in0:
+                        e0,b0,in0 = self.get_block_from_time(orderTime0,order)
+                    if not in1:
+                        e1,b1,in1 = self.get_block_from_time(orderTime1,order)
+                else:
+                    t0 = self.blockStart[e0,b0//self.nf,np.mod(b0,self.nf)]
+                    pxStart = self.time_to_frames(orderTime0.unix*u.s-t0)
+                    orderSpec = self.read_order(e0,b0,(e1-e0)*self.nf*self.nBlock + b1-b0+1,order)
+                    spec[:,order*self.nChan:(order+1)*self.nChan]=orderSpec[pxStart:pxStart+nFrames]
             return(spec,t0+pxStart*self.frameSec*self.rebin)
         except Exception as e:
-            print(f'In read_around: {e}')
+            print(f'In read_around: {e}',flush=True)
             return(spec*np.nan,tStart)
 
     def read_order_dedis(self,epoch,startBlock,length,order,pxStart,nFrame,baseOff,verbose=False):
@@ -446,34 +474,57 @@ class Stream:
         tStartDispersed = tStart+dispersionDelay
         tEndDispersed = tEnd+dispersionDelay
         ## get epoch and block for start time
-        eRef,bRef = self.get_block_from_time(tStart)
+        eRef,bRef,inRef = self.get_block_from_time(tStart)
         ## Time of first frame
         t0 = self.blockStart[eRef,bRef//self.nf,np.mod(bRef,self.nf)]
         spec = self.basic_spec(self.nChan0,nFrames)
         try:
             for order in range(self.nOrder):
-                e0,b0 = self.get_block_from_time(tStartDispersed[(order+1)*self.nChan-1])
-                e1,b1 = self.get_block_from_time(tEndDispersed[order*self.nChan])
-                baseOff = int(((e0-eRef)*self.nf*self.nBlock + b0-bRef)*self.blockFrame/self.rebin)
-                pxStart = self.time_to_frames((tStartDispersed[order*self.nChan:(order+1)*self.nChan].unix*u.s-t0))
-                orderSpec = self.read_order_dedis(e0,b0,(e1-e0)*self.nf*self.nBlock + b1-b0+1,order,pxStart,nFrames,baseOff)
-                if coherent:
-                        fSpec = np.fft.fft(orderSpec[:nFrames+2],axis=0)
-                        fftfreq = np.fft.fftfreq(nFrames+2)
-                        if len(spec.shape)==2:
-                            fSpec *= np.exp(1j*2*np.pi*fftfreq[:,np.newaxis]*(pxStart-np.round(pxStart))[np.newaxis,:])
-                        else:
-                            fSpec *= np.exp(1j*2*np.pi*fftfreq[:,np.newaxis]*(pxStart-np.round(pxStart))[np.newaxis,:])[:,:,np.newaxis]
-                        spec[:,order*self.nChan:(order+1)*self.nChan] = np.fft.ifft(fSpec,axis=0)[:nFrames]
+                ordered = np.reshape(self.blockStart[order*self.nEpochs:(order+1)*self.nEpochs],(-1))
+                orderTime0 = tStartDispersed[(order+1)*self.nChan-1]
+                orderTime1 = tEndDispersed[order*self.nChan]
+                orderStart = np.copy(tStartDispersed[order*self.nChan:(order+1)*self.nChan].unix*u.s)
+                e0,b0,in0 = self.get_block_from_time(orderTime0,order)
+                e1,b1,in1 = self.get_block_from_time(orderTime1,order)
+                while (not in0) or (not in1):
+                    if not in0:
+                        if e0*(self.nBlock*self.nf)+b0+1>=ordered.shape[0]:
+                            break
+                        offset = ordered[e0*(self.nBlock*self.nf)+b0+1]-orderTime0
+                        orderTime0+=offset
+                        orderStart+=offset
+                    if not in1:
+                        if e1*(self.nBlock*self.nf)+b1-1<0:
+                            break
+                        offset = ordered[e1*(self.nBlock*self.nf)+b1-1]-orderTime1
+                        orderTime1+=offset
+                    if orderTime0>orderTime1:
+                        break
+                    if not in0:
+                        e0,b0,in0 = self.get_block_from_time(orderTime0,order)
+                    if not in1:
+                        e1,b1,in1 = self.get_block_from_time(orderTime1,order)
                 else:
-                    spec[:,order*self.nChan:(order+1)*self.nChan] = orderSpec[:nFrames]
-                        
-                    # print(f'Dedisperse in {(Time.now()-ts).to_value(u.min):.1f} minutes',flush=True)
-            ep0 = t0 + self.time_to_frames((tStartDispersed.unix*u.s-t0))*self.frameSec.to_value(u.s)
-            return(spec,ep0)
+                    baseOff = int(((e0-eRef)*self.nf*self.nBlock + b0-bRef)*self.blockFrame/self.rebin)
+                    pxStart = self.time_to_frames((orderStart-t0))
+                    orderSpec = self.read_order_dedis(e0,b0,(e1-e0)*self.nf*self.nBlock + b1-b0+1,order,pxStart,nFrames,baseOff)
+                    if coherent:
+                            fSpec = np.fft.fft(orderSpec[:nFrames+2],axis=0)
+                            fftfreq = np.fft.fftfreq(nFrames+2)
+                            if len(spec.shape)==2:
+                                fSpec *= np.exp(1j*2*np.pi*fftfreq[:,np.newaxis]*(pxStart-np.round(pxStart))[np.newaxis,:])
+                            else:
+                                fSpec *= np.exp(1j*2*np.pi*fftfreq[:,np.newaxis]*(pxStart-np.round(pxStart))[np.newaxis,:])[:,:,np.newaxis]
+                            spec[:,order*self.nChan:(order+1)*self.nChan] = np.fft.ifft(fSpec,axis=0)[:nFrames]
+                    else:
+                        spec[:,order*self.nChan:(order+1)*self.nChan] = orderSpec[:nFrames]
+                            
+                        # print(f'Dedisperse in {(Time.now()-ts).to_value(u.min):.1f} minutes',flush=True)
+            ep0 = (t0 <<u.s) + self.time_to_frames((tStartDispersed.unix*u.s-(t0<<u.s)))*self.frameSec
+            return(spec,ep0.to_value(u.s))
         except Exception as e:
             print(f'In read_around_dedis({sys.exc_info()[2].tb_lineno}): {e}',flush=True)
-            ep0 = t0 + self.time_to_frames((tStartDispersed.unix*u.s-t0))*self.frameSec.to_value(u.s)
+            ep0 = (t0 <<u.s) + self.time_to_frames((tStartDispersed.unix*u.s-(t0<<u.s)))*self.frameSec
             return(spec*np.nan,ep0)
 
     def _pulsar_prep(self,config):
@@ -581,13 +632,14 @@ class Stream:
                 base = np.fft.fft(baseF,axis=1)
                 spec[:,order*self.nChan*upChan:(order+1)*self.nChan*upChan]=np.abs(base)[:,::-1]**2
         t = np.linspace((upChan-1)/2.,self.blockFrame - (upChan+1)/2,self.blockFrame//upChan)*self.frameSec
-        t += self.blockStart[epoch,int(startBlock//self.nf),np.mod(startBlock,self.nf)]
+        orderStarts = [self.blockStart[order*self.nEpochs+epoch,int(startBlock//self.nf),np.mod(startBlock,self.nf)] for order in range(self.nOrder)]
+        t += orderStarts[0]
         times = Time(t.to_value(u.s),format='unix')
         phaseRef = self.polyco.eval_phase(times.mjd)
         pulseFreq = self.polyco.eval_spin_freq(times.mjd).mean()*u.Hz
         for i in range(self.nChan0*upChan):
             column = spec[:,i]
-            pShift = (dispersionDelay[i]*pulseFreq).to(u.dimensionless_unscaled)
+            pShift = ((dispersionDelay[i]-(orderStarts[i//(self.nChan*upChan)]-orderStarts[0]))*pulseFreq).to(u.dimensionless_unscaled)
             phases =  np.mod(phaseRef-pShift+.5,1)-.5
             folded[i,:],__ = np.histogram(phases[np.isfinite(column)],weights=column[np.isfinite(column)],bins=np.linspace(-.5,.5,nBins+1))
             wts[i,:],__ = np.histogram(phases[np.isfinite(column)],bins=np.linspace(-.5,.5,nBins+1))

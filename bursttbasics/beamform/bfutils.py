@@ -5,20 +5,37 @@ from datetime import datetime, timedelta
 import numpy as np
 import matplotlib.pyplot as plt
 import astropy.units as u
-from astropy.coordinates import EarthLocation,AltAz
+from astropy.coordinates import EarthLocation,AltAz,SkyCoord
 import contextlib
 from astropy.stats import sigma_clip
 import subprocess
+from astropy.time import Time
 
-def find_files(eventID,searchDirs):
+def find_files(eventID : str,searchDirs : list) -> list:
+    """Find all ring files for a given trigger
+
+    Parameters
+    ----------
+    eventID : str
+        The event identifier to search for
+    searchDirs : list
+        List of all directors to search in
+
+    Returns
+    -------
+    matchedFiles : list
+        list of all files associated with event
+    """
     matchedFiles = []
+    ## Search for exact matches
     for searchDir in searchDirs:
         pattern = os.path.join(searchDir, f"*{eventID}*")
         match = glob(pattern)
         matchedFiles.extend(match)
+    ##Try dfferent eventID formats
     if not matchedFiles:
-        decType = False
         try:
+            ## If eventID has decimal, try stripping it
             eventT = datetime.strptime(eventID, "%Y%m%d_%H%M%S.%fZ")
             for searchDir in searchDirs:
                 pattern = os.path.join(searchDir, f"*{eventID.split('.')[0]}Z*")
@@ -61,7 +78,23 @@ def find_files(eventID,searchDirs):
                     break
     return(matchedFiles)
 
-def determine_beam(srce,time,plot=True):
+def determine_beam(srce : SkyCoord, time : Time , plot : bool = True) -> int:
+    """Determine the closest beam to a source at a given time
+
+    Parameters
+    ----------
+    srce : SkyCoord
+        Source coordinates
+    time : Time
+        Observation time
+    plot : bool
+        Whether to create a plot of the identified beam and source location
+
+    Returns
+    -------
+    beamID : int
+        BeamID for the event
+    """
     codeDir = os.path.dirname(os.path.realpath(__file__))
     fileName = "../beams_altaz_fus_16x16_b-7.5_-7.5_flim400_800_rot-3.0_sky400x700_ew-60_60_ns-70_70_att30n60_cal251027.npy"
     contour_altaz = np.load(os.path.join(codeDir,fileName), allow_pickle=True).item()
@@ -86,7 +119,25 @@ def determine_beam(srce,time,plot=True):
         plt.show()
     return(beamID)
 
-def in_beam_test(srce,time,findClosest=False,plot=True):
+def in_beam_test(srce : SkyCoord, time : Time, findClosest : bool = False, plot : bool = True) ->int:
+    """Determine which beam contains a given source at a given time
+
+    Parameters
+    ----------
+    srce : SkyCoord
+        Source coordinates
+    time : Time
+        Observation time
+    findClosest : bool
+        If source isn't in any beam, return the closest
+    plot : bool
+        Whether to create a plot of the identified beam and source location
+
+    Returns
+    -------
+    beamID : int
+        BeamID for the event
+    """
     # print('In Beam Test')
     FUS = EarthLocation(lon = 121*u.deg+34*u.arcmin+53.92087*u.arcsec,
                           lat = 24*u.deg+45*u.arcmin+23.37659*u.arcsec,
@@ -125,17 +176,55 @@ def in_beam_test(srce,time,findClosest=False,plot=True):
         return(minBeam)
     return(-1)
 
-def time_from_event(eventID):
-    return(f"{eventID[:4]}-{eventID[4:6]}-{eventID[6:8]} {eventID[9:11]}:{eventID[11:13]}:{eventID[13:-1]}")
+def time_from_event(eventID : str) -> str:
+    """ Convert event ID into approximate event time
 
-def plot_spectrum(spec,f,t,out=contextlib.nullcontext(),rbt=400,rbf=32,onWidth=5,**kwargs):
+    Parameters
+    ----------
+    eventID : string
+        ID of event
+
+    Returns
+    -------
+    time : string
+        ISOT time string of even
+    """
+    time = f"{eventID[:4]}-{eventID[4:6]}-{eventID[6:8]} {eventID[9:11]}:{eventID[11:13]}:{eventID[13:-1]}"
+    return(time)
+
+def plot_spectrum(spec : np.ndarray,f : u.Quantity,t : u.quantity,
+                  out=contextlib.nullcontext(),rbt : int = 400,rbf : int = 32,onWidth : int = 5,**kwargs)->None:
+    """ Plot the rebinned intesity spectrum
+    Parameters
+    ----------
+    spec : numpy ndarray
+        The complex spectrum to be plotted
+    f : astropy.units.Quantity
+        The frequency channels of the data
+    t : astropy.units.Quantity
+        the time bins of the data
+    out : context, optional
+        The context in which to plot the image (not sure if this is the right description)
+    rbt : int, optional
+        Rebinning factor in time. Defaults to 400
+    rbf : int, optional
+        Rebinning Factor in frequency. Defaults to 32
+    onWidth : int, optional
+        Number of samples on either side of peak to use in SNR. Defaults to 4
+    Returns
+    -------
+    None
+    """
     with out:
         I = np.abs(spec)**2
         I[np.abs(f-370*u.MHz)<10*u.MHz]=np.nan
         I/=np.nanmean(I,1)[:,np.newaxis]
-        v = I.std(1)
-        v2 = sigma_clip(v)
-        I[v2.mask]=np.nan
+        if "fixedMask" in kwargs:
+            I[kwargs['fixedMask']]=np.nan
+        else:
+            v = I.std(1)
+            v2 = sigma_clip(v)
+            I[v2.mask]=np.nan
         I2 = np.nanmean(np.reshape(I[:,:rbt*(I.shape[1]//rbt)],(1024,-1,rbt)),2)
         t2 = np.reshape(t[:rbt*I2.shape[1]],(-1,rbt)).mean(1)
         f2 = np.reshape(f,(-1,rbf)).mean(1)
@@ -181,7 +270,18 @@ def plot_spectrum(spec,f,t,out=contextlib.nullcontext(),rbt=400,rbf=32,onWidth=5
         plt.show()
     return(SNR.max())
 
-def transfer_data(transfer,station):
+def transfer_data(transfer : dict, station) -> None:
+    """Transfer data listed in transfer dictionary using the parameters given by station
+    Parameters
+    ----------
+    transfer : dict
+        Dictionary containing lists of files to be transfered
+    station : Station
+        Station object containing transfer information
+    Returns
+    -------
+    None
+    """
     for source in transfer.keys():
         if len(transfer[source])>0:
             bwLimit = f'{station.bwLimit}M'

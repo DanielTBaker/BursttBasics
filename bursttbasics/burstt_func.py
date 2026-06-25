@@ -6,6 +6,7 @@ import numpy as np
 from .packet_func import *
 from .burstt_const import *
 from tqdm.notebook import tqdm
+from scipy.special import erfc
 
 def gau1(x,A,x0,s,C):
     """ A simple 1D gaussian.
@@ -31,6 +32,9 @@ def gau1(x,A,x0,s,C):
     """
     gaus = A*np.exp(-np.power((x-x0)/s,2)/2)+C
     return(gaus)
+
+def exp_gau(x,A,x0,s,t,C):
+    return(A*np.exp(np.power(s/t,2)/2-(x-x0)/t)*erfc(((s/t)-((x-x0)/s))/np.sqrt(2))+C)
 
 def power(x,A,gamma):
     """ Power law for fitting

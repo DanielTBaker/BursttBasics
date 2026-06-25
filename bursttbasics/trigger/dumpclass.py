@@ -21,8 +21,12 @@ class StationDump:
     """
         Class for holding/processing a single beam of triggered data for a station
     """
-    def __init__(self,station):
+    def __init__(self,station,location=None):
         self.station=station
+        if location is None:
+            self.location= eval(f'{station}Center')
+        else:
+            self.location = location
 
     def get_file(self,baseDir,eventID,beam,oldVersion=False,sharedDir = False):
         """
@@ -50,7 +54,10 @@ class StationDump:
         arch = np.load(self.file)
         self.spec = arch['dd_spec']
         self.freq = arch['freq']*u.MHz
-        self.ep0 = arch['ep0']
+        if len(arch['ep0'].shape)==0 and 'ep' in arch.files:
+            self.ep0 = arch['ep']
+        else:
+            self.ep0 = arch['ep0']
         self.DM = arch['DM']*u.pc/u.cm**3
         if len(self.ep0.shape)==0:
             self.ep0=float(self.ep0)
@@ -85,10 +92,11 @@ class StationDump:
         self.spec[v2.mask]=np.nan
         self.clipped = True
 
-    def fit_spec(self,polFit=True,rbin=400,freqMin = -np.inf,freqMax = np.inf,**kwargs):
+    def fit_spec(self,polFit=True,rbin=400,freqMin = -np.inf,freqMax = np.inf,profModel=gau1,**kwargs):
         """
         Fit a simple pulse profile to the spectrum
         """
+        self.profModel = profModel
         I = np.abs(self.spec)**2
         I2 = np.reshape(I[:,:rbin*(I.shape[1]//rbin)],(I.shape[0],-1,rbin)).mean(2)
         t2 = np.reshape(self.time[:rbin*I2.shape[1]],(-1,rbin)).mean(1).to(u.ms)
@@ -102,8 +110,9 @@ class StationDump:
             A = prof.max()-N
             w = 10*(t2[1]-t2[0]).value
             self.poptT = np.array([A,t0,w,N])
-        self.poptT,pcov=curve_fit(gau1,t2.value,prof,p0=self.poptT)
-        wts = gau1(self.time.to_value(u.ms),*self.poptT)-self.poptT[-1]
+        print(prof.max())
+        self.poptT,pcov=curve_fit(self.profModel,t2.value,prof,p0=self.poptT)
+        wts = self.profModel(self.time.to_value(u.ms),*self.poptT)-self.poptT[-1]
         wts /= np.nansum(wts)
         spec = self.calc_spec(I,wts,noiseSub=True)
         # spec-=1
@@ -173,7 +182,7 @@ class StationDump:
         f2 = np.reshape(self.freq,(-1,rbf)).mean(1)
         SNR,on = self.calc_SNR(t2,I2,freqMin=freqMin,freqMax=freqMax)
         if self.modeled:
-            wts = gau1(self.time.to_value(u.ms),*self.poptT)-self.poptT[-1]
+            wts = self.profModel(self.time.to_value(u.ms),*self.poptT)-self.poptT[-1]
             wts/=np.nansum(wts)
             SNRF = self.calc_spec(I,wts,noiseSub=True)
         else:
@@ -196,7 +205,7 @@ class StationDump:
         plt.axhline(0,ls='--',c='k',alpha=.5)
         plt.text(t2.to(u.ms).min().value,SNR.max()*.9,f'SNR = {SNR.max():.2f}')
         if showModel and self.modeled:
-            model = gau1(t2.to_value(u.ms),*self.poptT)-self.poptT[-1]
+            model = self.profModel(t2.to_value(u.ms),*self.poptT)-self.poptT[-1]
             # model*=SNR.max()/model.max()
             plt.plot(t2.to(u.ms),model)
         plt.axvspan(t2[on].min().value,t2[on].max().value, alpha=0.5, color='green')
@@ -269,9 +278,15 @@ def dump_delay(stations,source,mode='center',decOff=0,raOff=0,**kwargs):
             epoch = Time(Time(stations[0].ep0[0],format='unix').isot)
         else:
             epoch = Time(Time(stations[0].ep0,format='unix').isot)
+    coords = []
+    for station in stations:
+        if hasattr(station,'location'):
+            coords.append(station.location)
+        else:
+            coords.append(eval(f'{station.station}Center'))
     ci = Calc(
             station_names = [station.station for station in stations],
-            station_coords=[eval(f'{station.station}Center') for station in stations],
+            station_coords=coords,
             source_coords=srce.icrs,
             start_time=epoch-2*u.min,
             duration_min=4,
@@ -279,10 +294,10 @@ def dump_delay(stations,source,mode='center',decOff=0,raOff=0,**kwargs):
         )
     ci.run_driver()
     if mode=='center':
-        delay = ci.interpolate_delays(epoch+stations[0].time.mean()).to(u.us)[0,1,0]
+        delay = ci.interpolate_delays(epoch).to(u.us)[0,1,0]
     else:
         delay = ci.interpolate_delays(epoch).to(u.us)[0,1,0]
     rates = ci.delay_rate[:,0,1,0]
     interp = interp1d(ci.times.mjd,rates.value)
-    rate = interp((epoch+stations[0].time.mean()).mjd)*rates.unit
+    rate = interp(epoch.mjd)*rates.unit
     return(delay,rate)

@@ -6,11 +6,28 @@ from scipy.optimize import curve_fit
 from .plotting import *
 import zipfile
 
+def get_peak_time(s0,baseOff=0,maxOff=100,width=2048,weight=True,idPeak=None,sampleTime = 2.56*u.us):
+    if weight:
+        modelT = s0.profModel(s0.time.to_value(u.ms),*s0.poptT)-s0.poptT[-1]
+        idPeak = np.argmax(modelT)
+    elif idPeak == None:
+        id0=maxOff+1
+        if baseOff<0:
+            id0-=baseOff
+        idPeak = id0+width//2
+    else:
+        id0=idPeak-width//2
+    if isinstance(s0.ep0,np.ndarray):
+        tRef = Time(s0.ep0[0],format='unix')+idPeak*sampleTime
+    else:
+        tRef = Time(s0.ep0,format='unix')+idPeak*sampleTime
+    return(tRef)
+
 def correlate_dump(s0,s1,
                    baseOff=0,maxOff=100,
                    width=2048,weight=True,idPeak=None,
                    rate=0*u.s*u.Hz,dDM = 0*u.pc/u.cm**3,
-                   progress=False,leave=True,sampleTime = 2.56*u.us,mean=False
+                   progress=False,leave=True,sampleTime = 2.56*u.us,mean=False,tauShift = 0*u.ns,
                   ):
     """ 
     Correlate the data in two station dumps
@@ -41,7 +58,7 @@ def correlate_dump(s0,s1,
     ## If using a model weight determine the weights
     ## also determine bounds of region to correlate
     if weight:
-        modelT = gau1(s0.time.to_value(u.ms),*s0.poptT)-s0.poptT[-1]
+        modelT = s0.profModel(s0.time.to_value(u.ms),*s0.poptT)-s0.poptT[-1]
         modelF = s0.freq_function(f0.value,*s0.poptF)-s0.poptF[-1]
         idPeak = np.argmax(modelT)
         id0 = idPeak-width//2
@@ -65,6 +82,8 @@ def correlate_dump(s0,s1,
     if not dDM ==0:
         dP = ((dDM/K)/s0.freq[use0]).to_value(u.dimensionless_unscaled)
         spec0 *= np.exp(-1j*2*np.pi*dP)[:,np.newaxis]
+    if not tauShift == 0*u.ns:
+        spec0*=np.exp(-1j*2*np.pi*(tauShift*s0.freq[use0]).to_value(u.dimensionless_unscaled))[:,np.newaxis]
     
 
     ## Check difference in start times
@@ -90,7 +109,7 @@ def correlate_dump(s0,s1,
                 cross/=np.abs(cross)
                 cross*=model
             ## FFT allong frequency for fine delay
-            cross-=np.nanmean(cross)
+            # cross-=np.nanmean(cross)
             if mean:
                 fCross = np.fft.fftshift(np.fft.fft(np.nan_to_num(np.nanmean(cross,1))))
                 corrs[:,ido]=fCross/np.median(np.abs(fCross))
@@ -120,11 +139,31 @@ def rate_dm_peaks(station0,station1,baseDelay,baseRate,
                 width=2048,weight=True,idPeak=None,mean=False,maxOff=20,
                  searchRange=1e-6*u.s*u.Hz,nRate=61,
                  dDMRange=1e-5*u.pc/u.cm**3,dDMFitRange=0,nDMs=1001,
-                 progress=False,line=False):
+                 progress=False,line=False,subSearch = np.linspace(0,0,1)):
+    """
+    Determine peak SNR over a grid of rates and differential DMs
+
+    Parameters
+    ----------
+    station0 : StationDump
+        The StationDump class with the data for the first station
+    station1 : StationDump
+        The StationDump class with the data for the second station 
+    baseDelay : astropy.Quantity
+        The expected signal delay of station1 relative to station0
+    baseRate : astropy.Quantity
+        The expected fringe rate between station1 and station0
+    width : int
+        Number of sample around peak to use in correlation. Default = 2048
+    weight : bool
+        Use fitted pulse profile weights for correlation. Default = True
+    Returns
+    -------
+    """
     dmSlope = -station0.DM
     fOverlap = get_f_overlap(station0,station1)
     baseOff = int((baseDelay//(2.56*u.us)).to_value(u.dimensionless_unscaled))
-    offsets,tau,corrs,startResidual,tRef =correlate_dump(station0,station1,
+    offsets,tau,corrs,startResidual,tRef = correlate_dump(station0,station1,
                                       maxOff=maxOff,width=width,
                                       weight=weight,
                                       progress=progress,
@@ -149,8 +188,9 @@ def rate_dm_peaks(station0,station1,baseDelay,baseRate,
     #     # dDMs = np.sort((np.linspace(rates.min(),rates.max(),nDMs)-baseRate)*dmSlope + dDMref)
 
     delays = (dDMs[:,np.newaxis]/K)/fOverlap[np.newaxis,:]**2
-    corrections = np.exp(-1j*2*np.pi*(delays*fOverlap[np.newaxis,:]).to_value(u.dimensionless_unscaled))
+    corrections = np.exp(-1j*2*np.pi*((delays[:,:,np.newaxis]+subSearch[np.newaxis,np.newaxis,:]*(tau[1]-tau[0])/2)*fOverlap[np.newaxis,:,np.newaxis]).to_value(u.dimensionless_unscaled))
     peaks = np.zeros((dDMs.shape[0],rates.shape[0]))
+    tauOff = np.zeros(peaks.shape)*u.ns
     # taus = np.zeros((dDMs.shape[0],rates.shape[0]))*u.ns
     iterator = enumerate(rates)
     if progress:
@@ -164,14 +204,18 @@ def rate_dm_peaks(station0,station1,baseDelay,baseRate,
                                       rate=rate,idPeak=idPeak,mean=mean)
         
         ift = np.fft.ifft(np.fft.ifftshift(corrs[:,0]))
-        corrected = corrections*ift
+        corrected = corrections*ift[np.newaxis,:,np.newaxis]
         if line:
             dDMoff = dmSlope*rate
-            corrected*=np.exp(-1j*2*np.pi*((dDMoff/K)/fOverlap[np.newaxis,:]).to(u.dimensionless_unscaled))
-        corrs2 = np.fft.fftshift(np.fft.fft(corrected,axis=1),axes=1)
-        peaks[:,i]=np.abs(corrs2).max(1)**2
+            corrected*=np.exp(-1j*2*np.pi*((dDMoff/K)/fOverlap[np.newaxis,:,np.newaxis]).to(u.dimensionless_unscaled))
+        corrs2 = np.abs(np.fft.fftshift(np.fft.fft(corrected,axis=1),axes=1))
+        
+        peaks[:,i]=corrs2.max((1,2))
+        args = np.argwhere(corrs2==peaks[:,i][:,np.newaxis,np.newaxis])
+        args = args[np.unique(args[:,0],return_index=True)[1]][:,2]
+        tauOff[:,i] = subSearch[args]*(tau[1]-tau[0])/2
         # taus[:,i]=tau[np.argmax(np.abs(corrs2),1)]
-    return(peaks,dDMs,rates,peakOff)
+    return(peaks**2,dDMs,rates,peakOff,tauOff)
 
 
 def fit_rate_dm(peaks,dDMs,rates):
@@ -209,7 +253,7 @@ def fit_rate_dm(peaks,dDMs,rates):
 
 def find_rate_dm(station0,station1,baseDelay,baseRate,
                  searchRange=1e-6*u.s*u.Hz,maxOff=20,dDMRange=1e-5*u.pc/u.cm**3,dDMFitRange=0,
-                 plot=False,progress=False,nRate=61,nDMs=1001,width=2048,weight=True,idPeak=None,gauFit = False,showPrediction=True,mean=False,line=False):
+                 plot=False,progress=False,nRate=61,nDMs=1001,width=2048,weight=True,idPeak=None,gauFit = False,showPrediction=True,mean=False,line=False,**kwargs):
     """ 
     Search for dDM and rate that maximize correlation amplitude
 
@@ -229,29 +273,86 @@ def find_rate_dm(station0,station1,baseDelay,baseRate,
         fraction of baseRate to search on either side (searchFrac=1 -> seach from 0 to 2*baseRate)    
 
     """
-    peaks,dDMs,rates,peakOff = rate_dm_peaks(station0,station1,baseDelay,baseRate,
+    peaks,dDMs,rates,peakOff,tauOffs = rate_dm_peaks(station0,station1,baseDelay,baseRate,
                 width,weight,idPeak,mean,maxOff,
                  searchRange,nRate,
                  dDMRange,dDMFitRange,nDMs,
-                 progress,line)
+                 progress,line,**kwargs)
     offset = peakOff*2.56*u.us
     poptR,poptD = fit_rate_dm(peaks,dDMs,rates)
-    dDM = poptD[1]*u.pc/u.cm**3
-    rate = poptR[1]*u.s*u.Hz
+    # dDM = poptD[1]*u.pc/u.cm**3
+    # rate = poptR[1]*u.s*u.Hz
+    idDM = np.argwhere(peaks==peaks.max())[0,0]
+    idRate = np.argwhere(peaks==peaks.max())[0,1]
+    dDM = dDMs[idDM]
+    rate = rates[idRate]
+    tauOff = tauOffs[idDM,idRate]
+    dDMError = poptD[2]*u.pc/u.cm**3
+    rateError = poptR[2]*u.s*u.Hz
+    dDMF = poptD[1]*u.pc/u.cm**3
+    rateF = poptR[1]*u.s*u.Hz
     if line:
         dDM-=station0.DM*rate
+        dDMF-=station0.DM*rate
+    if plot:
+        plt.figure()
+        plt.imshow(peaks,origin='lower',aspect='auto',extent=ext_find(rates,dDMs))
+        plt.xlabel(r'$\rm{rate}~\left(\rm{s}~\rm{Hz}\right)$')
+        if line:
+            plt.ylabel(r'$\Delta\rm{DM}_0~\left(\rm{pc}~\rm{cm}^{-3}\right)$')
+        else:
+            plt.ylabel(r'$\Delta\rm{DM}~\left(\rm{pc}~\rm{cm}^{-3}\right)$')
+        plt.figure()
+        plt.imshow(tauOffs.value,origin='lower',aspect='auto',extent=ext_find(rates,dDMs))
+        plt.xlabel(r'$\rm{rate}~\left(\rm{s}~\rm{Hz}\right)$')
+        if line:
+            plt.ylabel(r'$\Delta\rm{DM}_0~\left(\rm{pc}~\rm{cm}^{-3}\right)$')
+        else:
+            plt.ylabel(r'$\Delta\rm{DM}~\left(\rm{pc}~\rm{cm}^{-3}\right)$')
+
+    if plot:
+        offsets,taus,corrs,startResidual,tRef = correlate_dump(station0,station1,
+                                        maxOff=10,width=width,
+                                        weight=weight,
+                                        progress=False,
+                                        baseOff=peakOff,
+                                        rate=rate,idPeak=idPeak,mean=mean,dDM=dDM)
+        plot_corr(offsets,taus,corrs)
+        peakSNR = np.abs(corrs).max()**2
+        tau = taus[np.abs(corrs[:,10])==np.abs(corrs[:,10]).max()].mean()
+        tauErr = (taus[1]-taus[0])/2
+    else:
+        offsets,taus,corrs,startResidual,tRef = correlate_dump(station0,station1,
+                                        maxOff=0,width=width,
+                                        weight=weight,
+                                        progress=False,
+                                        baseOff=peakOff,
+                                        rate=rate,idPeak=idPeak,mean=mean,dDM=dDM)
+        
+        peakSNR = np.abs(corrs).max()**2
+        tau = taus[np.abs(corrs[:,0])==np.abs(corrs[:,0]).max()].mean()
+        tauErr = (taus[1]-taus[0])/2
     offsets,taus,corrs,startResidual,tRef = correlate_dump(station0,station1,
-                                      maxOff=0,width=width,
-                                      weight=weight,
-                                      progress=False,
-                                      baseOff=peakOff,
-                                      rate=rate,idPeak=idPeak,mean=mean,dDM=dDM)
-    
-    peakSNR = np.abs(corrs).max()**2
-    tau = taus[np.abs(corrs[:,0])==np.abs(corrs[:,0])].mean()
-    tauErr = (taus[1]-taus[0])/2
-    
-    return(dDM,dDMError,rate,rateError,tau,tauErr,peakSNR,offset,startResidual)
+                                        maxOff=0,width=width,
+                                        weight=weight,
+                                        progress=False,
+                                        baseOff=peakOff,
+                                        rate=rateF,idPeak=idPeak,mean=mean,dDM=dDMF)
+        
+    corrs = corrs[:,0]
+    corrsF = np.fft.ifft(np.fft.ifftshift(corrs))
+    fOverlap = get_f_overlap(station0,station1)
+    if "subSearch" in kwargs:
+        subSearch = kwargs['subSearch']
+    else:
+        np.linspace(0,0,1)
+    corrsF = np.exp(-1j*2*np.pi*((subSearch[:,np.newaxis]*(taus[1]-taus[0])/2)*fOverlap).to_value(u.dimensionless_unscaled))*corrsF
+    corrs = np.fft.fftshift(np.fft.fft(corrsF,axis=1),axes=1)
+    corrs = np.abs(corrs)
+    argmax = np.argmax(corrs)
+    tauOffF = subSearch[argmax//taus.shape[0]]*(taus[1]-taus[0])/2
+    tauF = taus[np.mod(argmax,taus.shape[0])]
+    return(dDM,dDMF,dDMError,rate,rateF,rateError,tau,tauF,tauErr,peakSNR,offset,startResidual,tauOff,tauOffF)
 
 
 
