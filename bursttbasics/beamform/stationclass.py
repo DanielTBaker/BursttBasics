@@ -20,6 +20,7 @@ import warnings
 warnings.filterwarnings('ignore')
 from .bfutils import *
 from ..packet_func import *
+from ..burstt_const import *
 
 
 class Station:
@@ -37,7 +38,7 @@ class Station:
     f0 : astropy.units.Quantity
         Lowest frequency channel of site. Defaults to 400MHz
     fRef : astropy.units.Quantity
-        
+
     """
     def __init__(self,nAnt =16,nRow = 16,
                  nChan = 1024, nOrder = 8,
@@ -710,7 +711,7 @@ class Station:
             #             ddSpec[ch,-pp:-pp+max_len] = tmp[:]
         return(ddSpec,startTimes,beamIDX,beamIDY,hasData)
         
-    def fold_on_target(self,files,ep0,nSample=20000,period = 1*u.s,DM = 0,nBins = 256,find_cal=True,**kwargs):
+    def fold_on_target(self,files,ep0,nSample=20000,period = 1*u.s,DM = 0,nBins = 256,find_cal=True,useSource=True,**kwargs):
         ep0T = Time(ep0, scale='utc')
         if find_cal:
             self.find_best_cal(ep0T)
@@ -724,6 +725,18 @@ class Station:
         elif 'sourceName' in kwargs:
             beamIDF = determine_beam(SkyCoord.from_name(kwargs['sourceName']),ep0T)
             beamIDX,sinThetaIDY,beamIDY =  self.beamIDs_from_FUS(beamIDF)
+            if useSource:
+                globals()[f'{self.stationID}Center']
+                alaz = AltAz(location=FUSCenter,obstime=ep0T)
+                srce = SkyCoord.from_name(kwargs['sourceName']).transform_to(alaz)
+                x = np.cos(srce.az-3*u.deg)
+                y = np.sin(srce.az-3*u.deg)
+                z = np.sin(srce.alt)
+                x *= np.cos(srce.alt)
+                y *=np.cos(srce.alt)
+                sNS = np.arctan(x).to(u.deg)
+                sEW = np.arctan(y).to(u.deg)
+                sinThetaIDY = np.sin(sNS).value
         elif 'ra' in kwargs and 'dec' in kwargs:
             beamIDF = determine_beam(SkyCoord(ra = kwargs['ra']<<u.deg,dec=kwargs['dec']<<u.deg),ep0T)
             beamIDX,sinThetaIDY,beamIDY =  self.beamIDs_from_FUS(beamIDF)

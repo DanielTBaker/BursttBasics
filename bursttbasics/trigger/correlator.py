@@ -207,7 +207,7 @@ def rate_dm_peaks(station0,station1,baseDelay,baseRate,
         corrected = corrections*ift[np.newaxis,:,np.newaxis]
         if line:
             dDMoff = dmSlope*rate
-            corrected*=np.exp(-1j*2*np.pi*((dDMoff/K)/fOverlap[np.newaxis,:,np.newaxis]).to(u.dimensionless_unscaled))
+            corrected*=np.exp(-1j*2*np.pi*((dDMoff/K)/fOverlap[np.newaxis,:,np.newaxis]).to_value(u.dimensionless_unscaled))
         corrs2 = np.abs(np.fft.fftshift(np.fft.fft(corrected,axis=1),axes=1))
         
         peaks[:,i]=corrs2.max((1,2))
@@ -241,11 +241,11 @@ def fit_rate_dm(peaks,dDMs,rates):
     if poptD[0]+poptD[-1] < y.max()*.95:
         width = max(2*np.abs(poptD[2]),np.abs(poptD[1]-t00),10*(x[1]-x[0]))
         poptD,pcovD=curve_fit(gau1,x[np.abs(x-t00)<width],y[np.abs(x-t00)<width],p0=poptD)
-        err = (y[np.abs(x-t00)<width]-gau1(x[np.abs(x-t00)<width],*poptD)).std()
-        poptD,pcovD=curve_fit(gau1,x[np.abs(x-t00)<width],y[np.abs(x-t00)<width],p0=poptD,sigma=err,absolute_sigma=True)
+        # err = (y[np.abs(x-t00)<width]-gau1(x[np.abs(x-t00)<width],*poptD)).std()
+        # poptD,pcovD=curve_fit(gau1,x[np.abs(x-t00)<width],y[np.abs(x-t00)<width],p0=poptD,sigma=err,absolute_sigma=True)
     else:
         err = (y-gau1(x,*poptD)).std()
-        poptD,pcovD=curve_fit(gau1,x,y,p0=poptD,sigma=err,absolute_sigma=True)
+        poptD,pcovD=curve_fit(gau1,x,y,p0=poptD)
         
         
     return(poptR,poptD)
@@ -386,10 +386,16 @@ def get_ppp_date(year,day,station):
     return(pppTime[clock!=0],clock[clock!=0])
     
 def get_clock_correction(times,station0='FUS',station1='LTN'):
-        years,days = time_to_year_day(times+(18*u.s)-1*u.day)
+        years,days = time_to_year_day(times+(18*u.s))
         clockCorr = np.zeros(times.shape[0])*np.nan*u.us
-        pppTime0,clock0 =  get_ppp_date(years[0],days[0],station0)
-        pppTime1,clock1 =  get_ppp_date(years[0],days[0],station1)
+        pppTime0,clock0 =  get_ppp_date(years[0],days[0]-1,station0)
+        pppTime1,clock1 =  get_ppp_date(years[0],days[0]-1,station1)
+        i=1
+        while times.min()<pppTime0.min() or times.min()<pppTime1.min():
+            years,days = time_to_year_day(times+(18*u.s)-i*u.day)
+            pppTime0,clock0 =  get_ppp_date(years[0],days[0],station0)
+            pppTime1,clock1 =  get_ppp_date(years[0],days[0],station1)
+            i+=1
         interp0 = interp1d(pppTime0.mjd,clock0.to_value(u.us))
         interp1 = interp1d(pppTime1.mjd,clock1.to_value(u.us))
         for i,t in enumerate(times):

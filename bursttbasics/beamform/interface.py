@@ -490,12 +490,12 @@ class StationProperties(widgets.GridspecLayout):
 class BeamFormerRun(widgets.VBox):
     def __init__(self,station,**kwargs):
         super().__init__(**kwargs)
-        self.dataFolders = sorted(glob("/burstt[0-9]/disk*/data*")+glob("/burstt1[0-9]/disk*/data*"))
+        self.dataFolders = sorted(glob("/burstt[0-9]/disk*/*data*")+glob("/burstt1[0-9]/disk*/*data*"))
         self.station=station
         self.eventBox = widgets.HBox()
         self.triggerRefresh = widgets.Button(icon='refresh',layout=widgets.Layout(width='5ch'))
         self.triggerRefresh.on_click(self.refresh_triggers)
-        events = np.sort(np.unique(np.array([x.split('/')[-1][6:-12] for x in glob("/burstt[0-9]/disk*/data*/ring*Z.trig*")+glob("/burstt1[0-9]/disk*/data*/ring*Z.trig*")])))
+        events = np.sort(np.unique(np.array([x.split('/')[-1][6:-12] for x in glob("/burstt[0-9]/disk*/*data*/ring*Z.trig*")+glob("/burstt1[0-9]/disk*/*data*/ring*Z.trig*")])))
         self.eventID = widgets.Dropdown(options=events,value=events[0],descrition='eventID')
         self.ep0 = widgets.Text(value = time_from_event(self.eventID.value),description='ep0',continuous_update=False)
         self.eventBox.children = [self.triggerRefresh,self.eventID,self.ep0]
@@ -583,7 +583,7 @@ class BeamFormerRun(widgets.VBox):
         self.children = [self.eventBox,self.accordion]
 
     def refresh_triggers(self,click):
-        events = np.sort(np.unique(np.array([x.split('/')[-1][6:-12] for x in glob("/burstt[0-9]/disk*/data*/ring*Z.trig*")+glob("/burstt1[0-9]/disk*/data*/ring*Z.trig*")])))
+        events = np.sort(np.unique(np.array([x.split('/')[-1][6:-12] for x in glob("/burstt[0-9]/disk*/*data*/ring*Z.trig*")+glob("/burstt1[0-9]/disk*/*data*/ring*Z.trig*")])))
         self.eventID.options = events
         
     def run_calibrator(self,click):
@@ -861,7 +861,7 @@ class CSVTab(widgets.VBox):
         self.children = [self.table,self.overrideBox,self.runStyle,self.tOff,self.run,self.foldTab,self.checkBox,self.output]
         
     def prune(self,click):
-        dataFolders = sorted(glob("/burstt[0-9]/disk*/data*")+glob("/burstt1[0-9]/disk*/data*"))
+        dataFolders = sorted(glob("/burstt[0-9]/disk*/*data*")+glob("/burstt1[0-9]/disk*/*data*"))
         clipRows = []
         for rowID,row in enumerate(self.table.table.children):
             eventID = getattr(row,'EventID').value
