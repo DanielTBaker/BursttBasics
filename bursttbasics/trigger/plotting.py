@@ -23,6 +23,7 @@ def plot_corr(offsets,tau,corrs,**kwargs):
             for delay in kwargs['expected']:
                 if isinstance(delay,u.Quantity):
                     plt.axvline(delay.to_value(u.us),ls='--',c='k')
+                    
         elif isinstance(kwargs['expected'],u.Quantity):
             plt.axvline(kwargs['expected'].to_value(u.us),ls='--',c='k')
         

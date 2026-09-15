@@ -270,7 +270,7 @@ def plot_spectrum(spec : np.ndarray,f : u.Quantity,t : u.quantity,
         plt.show()
     return(SNR.max())
 
-def transfer_data(transfer : dict, station) -> None:
+def transfer_data(transfer : dict, station,**kwargs) -> None:
     """Transfer data listed in transfer dictionary using the parameters given by station
     Parameters
     ----------
@@ -286,8 +286,11 @@ def transfer_data(transfer : dict, station) -> None:
         if len(transfer[source])>0:
             bwLimit = f'{station.bwLimit}M'
             targetIP = station.targetIP
-            targetDir = f'/burstt_home/shared/dbaker/{source.lower()}'
-            destination = f'ubuntu@{targetIP}:{targetDir}'
+            if 'dest' in kwargs:
+                targetDir = kwargs['dest']
+            else:
+                targetDir = f'/burstt_home/shared/dbaker/{source.lower()}'
+            destination = f'{station.username}@{targetIP}:{targetDir}'
             command = ["rsync", "-avh", '--info=progress2', '--remove-source-files'] + transfer[source] + [destination, f'--bwlimit={bwLimit}']
             print(f'Start transfer of {len(transfer[source])} {source} files')
             process = subprocess.Popen(command,
@@ -308,3 +311,4 @@ def transfer_data(transfer : dict, station) -> None:
                     print("\nTransfer Complete.")
                 else:
                     print(f"\nError: Rsync exited with code {return_code}")
+

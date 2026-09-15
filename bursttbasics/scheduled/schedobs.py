@@ -3,6 +3,7 @@ from ..burstt_const import *
 from ..burstt_func import *
 from .parallel import *
 from .streams import *
+from ..trigger import dumpclass as dc
 
 import configparser
 from astropy.time import Time
@@ -18,8 +19,18 @@ import pint.logging
 import os
 from pycalc11 import Calc
 from scipy.interpolate import interp1d
+import pickle
 
 pint.logging.setup(level='ERROR')
+
+def convert_result(result):
+    for key in result.keys():
+        if key =='time':
+            result['time']=Time([x for x in result['time']])
+        elif isinstance(result[key][0],u.Quantity):
+            result[key] = np.array([x.value for x in result[key]])*result[key][0].unit
+        else:
+            result[key] = np.array([x for x in result[key]])
 
 class Observation:
     def __init__(self,configFile):
@@ -62,10 +73,8 @@ class Observation:
                 self.streams.append(Baseband(self.config,s))
             else:
                 self.streams.append(Intensity(self.config,s))
-        self.earliest = Time(np.array([np.nanmin(stream.blockStart).value for stream in self.streams]).max(),
-                        format='unix').mjd
-        self.latest = Time(np.array([np.nanmax(stream.blockStart).value+stream.blockFrame*stream.frameSec.to_value(u.s)  for stream in self.streams]).min(),
-                      format='unix').mjd
+        self.earliest = min([s.earliest for s in self.streams])
+        self.latest = max([s.latest for s in self.streams])
         if 'endTime' in self.analysisPars:
             parLatest = Time(self.analysisPars['endTime']).mjd
             self.latest = min(self.latest,parLatest)
@@ -95,15 +104,7 @@ class Observation:
             if self.taskPars.getboolean('SNR',False):
                 self.pulse_SN(self.config['SN'].getint('nPool'))
             if self.taskPars.getboolean('correlate',False) or self.taskPars.getboolean('makeIntensities',False):
-                self.pulsar_correlate(corrWidth = int(self.config['Correlating'].getfloat('corrFrames',200)),
-                                     nSearch = int(self.config['Correlating'].getfloat('nSearch',200)),
-                                     doCorr = self.taskPars.getboolean('correlate',False),
-                                     nPool = int(self.config['Correlating'].getfloat('nPool',80)),
-                                     nCorr = int(self.config['Correlating'].getfloat('nCorr',40)),
-                                     saveCuts = self.config['Correlating'].getboolean('savecuts',False),
-                                     predictDelays = self.config['Correlating'].getboolean('predictDelay',False),
-                                     useClock = self.config['Correlating'].getboolean('useClock',False)
-                                    )
+                self.pulsar_correlate()
             if self.taskPars.getboolean('formDspec',False):
                 self.make_dspec(intBlocks=self.config['Dspec'].getint('intBlocks'),
                                 nBins=self.config['Dspec'].getint('nBins'),
@@ -112,10 +113,7 @@ class Observation:
                                 )
         if self.sourceType == 'quasar':
             if self.taskPars.getboolean('correlate',False):
-                self.chunk_correlate(chunkWidth=self.config['Correlating'].getfloat('chunkWidth',1)*u.s,
-                                     maxShift=int(self.config['Correlating'].getfloat('nSearch',200)),
-                                     nPool = int(self.config['Correlating'].getfloat('nPool',80))
-                                     )
+                self.chunk_correlate()
         if self.taskPars.getboolean('corrPlots',False):
             self.examine_correlation()
 
@@ -131,7 +129,8 @@ class Observation:
             lastStarts = self.streams[streamID].blockStart[-1,:,0]
             missing = lastStarts.shape[0]-lastStarts[np.isfinite(lastStarts)].shape[0]
             totalBlocks-=missing*self.streams[streamID].nf
-            startBlock = int((startOff/(self.streams[streamID].blockFrame*self.streams[streamID].frameSec)).to(u.dimensionless_unscaled))
+            # startBlock = int((startOff/(self.streams[streamID].blockFrame*self.streams[streamID].frameSec)).to(u.dimensionless_unscaled))
+            startBlock = 0
             useBlocks = totalBlocks-startBlock
             if np.isfinite(length):
                 lengthBlock = int((length/(self.streams[streamID].blockFrame*self.streams[streamID].frameSec)).to(u.dimensionless_unscaled))+1
@@ -252,42 +251,59 @@ class Observation:
         allDelays = np.concatenate([(delayVLBI[:,i,i+1:].T) for i in range(delayVLBI.shape[1])],axis=0)
         return(allDelays)
 
-    def pulsar_correlate(self,
-                         corrWidth = 2000,
-                         nSearch = 200,
-                         doCorr = True,
-                         nPool = 80,
-                         nCorr = 40,
-                         saveCuts = False,
-                         predictDelays = False,
-                         useClock = False,
-                        ):
+    def pulsar_correlate(self):
+        ## Number of samples to correlate per pulse
+        corrWidth = self.config['Correlating'].getint('corrFrames',2048)
+        ## Number of coarse shifts on either side of the expected value to search
+        nSearch = self.config['Correlating'].getint('nSearch',1)
+        ## Number of parallel processes
+        nPool = self.config['Correlating'].getint('nPool',80)
+        ## Number of groups to skip at the start
+        skipNum = self.config['Correlating'].getint('nSkip',0)
+        ## Maximum number of groups to run
+        runNum = self.config['Correlating'].getint('nRun',999999)
+        ## Perform coherent dedispersion on data
+        coherent = self.config['Correlating'].getboolean('coherentDD',True)
+        ## Plot output
+        makePlots = self.config['Correlating'].getboolean('makePlots',False)
+        ## Save cropped dedispersed data
+        saveCuts = self.config['Correlating'].getboolean('saveCuts',False)
+        ## dDM0 range to search overf in correlator
+        dDMRange = self.config['Correlating'].getfloat('dDM',5e-6)*u.pc/u.cm**3
+        ## Number of rates to search over
+        nRate = self.config['Correlating'].getint('nRate',101)
+        ## Number of sub pixel tau shifts
+        nSub = self.config['Correlating'].getint('nSub',11)
+        ## Maximum rate to look at
+        rateRange = self.config['Correlating'].getfloat('rateRange',1e-6)*u.s*u.Hz
+        ## Do full rate-dDM search
+        doFull = self.config['Correlating'].getboolean('doFull',False)
+        ## Names of streams to be correlated
         correlationStreamNames = np.array(self.config['Correlating'].get('streams').split(','))
+        ## Save intensities
+        saveI = self.config['Correlating'].getboolean('saveI',False)
+        meanSub = self.config['Correlating'].getboolean('meanSub',False)
+
+
+        ## Dictionary to store results
+        correlations = {}
+        ## List of correlation streams
         correlationStreams = []
         for name in correlationStreamNames:
             for i in range(self.streamNames.shape[0]):
                 if self.streamNames[i]==name:
                     correlationStreams.append(self.streams[i])
-        correlationStations = [stream.station for stream in correlationStreams]
+        
+        ## Pulse arrival times
         ToAs = np.copy(correlationStreams[0].ToAs)
+        ## Filter ToAs to make sure that they're within the time range of each stream
         for stream in correlationStreams:
             maxDispdelay = ((stream.DM/K)*(1/(stream.freq.min()**2)-1/(self.polyCoFreq**2))).to(u.s)
-            ToAs = ToAs[(ToAs*u.s>stream.earliest+self.pulseWidth)*(ToAs*u.s<stream.latest-self.pulseWidth-maxDispdelay)]
-        if predictDelays:
-            predictedDelays = (self.predict_delay(Time(ToAs,format='unix'),correlationStations)/self.streams[0].frameSec).to_value(u.dimensionless_unscaled)
-        else:
-            predictedDelays = np.zeros((self.nBaselines,ToAs.shape[0]))
-        if useClock:
-            try:
-                clock = (self.get_clock_correction(Time(ToAs,format='unix'))/self.streams[0].frameSec).to_value(u.dimensionless_unscaled)
-                predictedDelays += clock
-            except Exception as e:
-                if self.verbose:
-                    print('No PPP available')
-                    print(e)
-                    print(clock[0],predictedDelays[0])
-        predictedDelays = np.round(predictedDelays).astype(int)
+            ToAs = ToAs[(Time(ToAs,format='unix')>stream.earliest+self.pulseWidth)*(Time(ToAs,format='unix')<stream.latest-self.pulseWidth-maxDispdelay)]
+        print(f'nToAs: {ToAs.shape[0]}')
+        ## Divide ToAs into groups of pool size
         groups = int(ToAs.shape[0]//nPool) +1
+        ## Create Processes
         procs = []
         if self.verbose:
             print('Building Proccesses')
@@ -295,204 +311,156 @@ class Observation:
             procs.append(SinglePulseProcess(i,self.verbose))
         for p in procs:
             p.start()
+            p.load_calc()
+            p.front_pipe.recv()
             p.give_obs(correlationStreams)
             p.front_pipe.recv()
-        skips = self.config['Correlating'].getint('skip',0)
-        for groupID in range(groups):
-            if groupID<skips:
-                continue
-            if self.verbose:
-                print(f'Start group {groupID}')
-            gs = Time.now()
-            ## Determine group Indexes
-            groupStart = groupID*nPool
-            groupSize = min(nPool,ToAs.shape[0]-groupStart)
-            corrSize = min(nCorr,ToAs.shape[0]-groupStart)
-        
-            ## Load Data
-            for i in range(groupSize):
-                procs[i].load_data([self.polyCoFreq,Time(ToAs[groupStart+i],format='unix'),self.pulseWidth,self.config['Correlating'].get('dedisperse')=='coherent'])
-            if self.verbose:
-                print(f'Reads Started at {(Time.now()-gs).to_value(u.min):.1f} minutes coherent is {self.config["Correlating"].get("dedisperse")=="coherent"}',flush=True)
-            ## Read data from each process as it becomes available
-            for i in range(groupSize):
-                results = procs[i].front_pipe.recv()
-                if i == 0: 
-                    I = results[1]
-                    var = results[2]
-                else:
-                    for obsID in range(len(correlationStreams)):
-                        I[obsID] += results[1][obsID]
-                        var[obsID] += results[2][obsID]
-            if self.verbose:
-                print(f'Reads Complete at {(Time.now()-gs).to_value(u.min):.1f} minutes',flush=True)
-            if saveCuts:
+        ## Big ol' Try
+        try:
+            ## Run for all groups
+            for groupID in range(groups):
+                ## Skip specified groups (mostly for testing)
+                if groupID<skipNum or groupID>=skipNum+runNum:
+                    continue
+                if self.verbose:
+                    print(f'Start group {groupID}')
+                gs = Time.now()
+                ## Determine group Indexes
+                groupStart = groupID*nPool
+                groupSize = min(nPool,ToAs.shape[0]-groupStart)
+            
+                ## Load Data
                 for i in range(groupSize):
-                    procs[i].save_cuts(os.path.join(self.cutDir,
-                                                    f'BURSTT_{self.sourceName}_{self.obsDate}_{groupStart+i}'))
-                    procs[i].front_pipe.recv()
-            ## Finalize Averaging
-            I = [x/groupSize for x in I]
-            Imeds = [x.mean(0) for x in I]
-            for streamID in range(len(correlationStreams)):
-                var[streamID]/=Imeds[streamID]
-            var2 = [sigma_clip(x, sigma=2.0) for x in var]
-            masks = [x.mask for x in var2]
-            for streamID in range(len(correlationStreams)):
-                I[streamID].mask = masks[streamID].reshape((-1,masks[streamID].shape[0]))
-                I[streamID] = np.reshape(I[streamID]/Imeds[streamID],(I[streamID].shape[0],-1,32)).mean(2)
-            ## Make Plots
-            for streamID,stream in enumerate(correlationStreams):
-                grid = plt.GridSpec(nrows=4,ncols=4)
-                plotTime = np.linspace(0,I[streamID].shape[0]*400-1,
-                                       I[streamID].shape[0]*400)*stream.frameSec.to(u.ms)
-                plotTime = np.reshape(plotTime,(-1,400)).mean(1)
-                plotFreq = np.reshape(stream.freq,(-1,32)).mean(1)
-                ext = ext_find(plotTime,plotFreq)
-                plt.figure(figsize=(6,6))
-                plt.subplot(grid[:3,:3])
-                plt.imshow(I[streamID].T,
-                           origin='lower',aspect='auto'
-                           ,vmin=2-(I[streamID][:,:20].mean(1).max()),vmax=I[streamID][:,:20].mean(1).max(),
-                           extent=ext)
-                plt.ylabel('Freq (MHz)')
-                plt.xticks([])
-                plt.subplot(grid[-1,:3])
-                plt.plot(plotTime,I[streamID][:,:20].mean(1))
-                plt.xlabel('Time (ms)')
-                plt.ylabel('I')
-                plt.xlim(ext[:2])
-                plt.subplot(grid[:3,-1])
-                plt.plot(var[streamID],stream.freq)
-                plt.plot(var2[streamID],stream.freq)
-                plt.xlabel('Variance')
-                plt.tight_layout()
-                plt.savefig(os.path.join(self.plotDir,f'BURSTT_{self.sourceName}_{self.obsDate}_{groupID}_{stream.name}_I_{self.config["Correlating"].get("dedisperse")}.png'))
-                np.savez(os.path.join(self.intensityDir,f'BURSTT_{self.sourceName}_{self.obsDate}_{groupID}_{stream.name}_I_{self.config["Correlating"].get("dedisperse")}.npz'),I=I[streamID],f=stream.freq,t=plotTime)
-                ## Fit model to first I
-                if streamID == 0:
-                    y=I[streamID][:,:20].mean(1)
-                    C0 = 1.
-                    A0 = y.max()-C0
-                    x0 = plotTime[y==y.max()].mean().to_value(u.us)
-                    s0 = plotTime.max().to_value(u.us)/10
-                    try:
-                        poptT,pcovT = curve_fit(gau1,plotTime.to_value(u.us),y,p0=[A0,x0,s0,C0])
-                    except:
-                        poptT = np.array([A0,plotTime.mean().to_value(u.us),s0,C0])
-                    tProf = gau1(plotTime.to_value(u.us),*poptT[:-1],0)
-                    y2=((I[streamID]-poptT[-1])*tProf[:,np.newaxis]).sum(0)/np.sum(tProf)
-                    p0 = [y2[0]/np.power(stream.freq[0].to_value(u.MHz)/400,-2),-2,0]
-                    try:
-                        poptF,pcovF = curve_fit(frequency_model,np.reshape(stream.freq,(I[streamID].shape[1],-1)).mean(1)[:25].to_value(u.MHz),y2[:25],p0=p0,maxfev=10000)
-                    except:
-                        poptF = p0
-                    model = power(np.reshape(stream.freq,(I[streamID].shape[1],-1)).mean(1)[:25].to_value(u.MHz),*poptF)[:,np.newaxis]*tProf
-                    plt.figure(figsize=(6,6))
-                    plt.subplot(grid[:3,:3])
-                    plt.imshow(model,
-                               origin='lower',aspect='auto',
-                               extent=ext)
-                    plt.ylabel('Freq (MHz)')
-                    plt.xticks([])
-                    plt.subplot(grid[-1,:3])
-                    plt.plot(plotTime,y-poptT[-1])
-                    plt.plot(plotTime,tProf)
-                    plt.xlabel('Time (ms)')
-                    plt.ylabel('I')
-                    plt.xlim(ext[:2])
-                    plt.subplot(grid[:3,-1])
-                    plt.plot(y2,np.reshape(stream.freq,(I[streamID].shape[1],-1)).mean(1).to_value(u.MHz))
-                    plt.plot(frequency_model(np.reshape(stream.freq,(I[streamID].shape[1],-1)).mean(1).to_value(u.MHz),*poptF),np.reshape(stream.freq,(I[streamID].shape[1],-1)).mean(1).to_value(u.MHz))
-                    plt.xlabel('I')
-                    plt.tight_layout()
-                    plt.savefig(os.path.join(self.plotDir,f'BURSTT_{self.sourceName}_{self.obsDate}_{groupID}_{stream.name}_model_{self.config["Correlating"].get("dedisperse")}.png'))
-            if doCorr:
-                for procID,proc in enumerate(procs[:corrSize]):
-                    proc.correlate([masks,
-                                    poptT,poptF,
-                                    corrWidth,
-                                    nSearch,predictedDelays[:,procID+groupStart],
-                                    self.config["Correlating"].getboolean("dmSearch",False),
-                                    self.polyCoFreq,
-                                    self.config["Correlating"].getboolean("dmPhase",False),
-                                    self.config["Correlating"].getint("size",2048)
-                                   ])
+                    procs[i].load_data([self.polyCoFreq,Time(ToAs[groupStart+i],format='unix'),self.pulseWidth,coherent])
+                if self.verbose:
+                    print(f'Reads Started at {(Time.now()-gs).to_value(u.min):.1f} minutes coherent is {coherent}',flush=True)
+                ## Read data from each process as it becomes available
+                for i in range(groupSize):
+                    results = procs[i].front_pipe.recv()
+                    if i == 0: 
+                        I = results[1]
+                        var = results[2]
+                    else:
+                        for obsID in range(len(correlationStreams)):
+                            I[obsID] += results[1][obsID]
+                            var[obsID] += results[2][obsID]
+                if self.verbose:
+                    print(f'Reads Complete at {(Time.now()-gs).to_value(u.min):.1f} minutes',flush=True)
+                ## Make Plots
+                tester = dc.StationDump('FUS')
+                for streamID,stream in enumerate(correlationStreams):
+                    tester.spec = np.sqrt(I[streamID].T)
+                    tester.freq = stream.freq
+                    tester.time = np.linspace(0,tester.spec.shape[1],tester.spec.shape[1],endpoint=False)*400*stream.frameSec.to(u.us)
+                    tester.time += np.linspace(0,400,400,endpoint=False).mean()*stream.frameSec
+                    tester.norm_spec()
+                    tester.clip_spec()
+                    if saveI:
+                        np.savez(os.path.join(self.intensityDir,f'BURSTT_{self.sourceName}_{self.obsDate}_{groupID}_{stream.name}_I_{self.config["Correlating"].get("dedisperse")}.npz'),I=tester.spec,f=stream.freq,t=tester.time)
+                    ## Fit model to first I
+                    if streamID == 0:
+                        tester.fit_spec(polFit=False,rbin=1)
+                        poptT = tester.poptT
+                        poptF = tester.poptF
+                    tester.plot_spec(showModel=(streamID==0),rbt=1)
+                    plt.savefig(os.path.join(self.plotDir,f'BURSTT_{self.sourceName}_{self.obsDate}_{groupID}_{stream.name}_I_{self.config["Correlating"].get("dedisperse")}.png'))
+
+                model = get_model(self.streams[0].parFile)
+                source = model.as_ICRS(Time(self.streams[0].ToAs.mean(),format='unix')).coords_as_ICRS()
+                source = SkyCoord(ra=source.ra,dec=source.dec)
+                for procID,proc in enumerate(procs[:groupSize]):
+                    proc.correlate([poptT,poptF,
+                                    source,corrWidth,meanSub,nSearch,nSub,nRate,dDMRange,rateRange,
+                                    doFull,makePlots,saveCuts,groupID])
                 print(f'Correlations Started at {(Time.now()-gs).to_value(u.min):.1f} minutes',flush=True)
                 for i,p in enumerate(procs[:groupSize]):
                     results = p.front_pipe.recv()
-                    if i == 0:
-                        corrs = results[1]
-                        peakT = results[2]
-                        offsets = results[3]
-                    else:
-                        for pairID in range(len(results[1])):
-                            peakT[pairID] += results[2][pairID]
-                            if i==1:
-                                corrs[pairID] = np.concatenate([corrs[pairID][np.newaxis,:,:],results[1][pairID][np.newaxis,:,:]],axis=0)
-                                offsets[pairID] = np.concatenate([offsets[pairID][np.newaxis,:],results[3][pairID][np.newaxis,:]],axis=0)
+                    if results[0]=='data correlated':
+                        for baseline in results[1].keys():
+                            if baseline in correlations.keys():
+                                for key in results[1][baseline].keys():
+                                    correlations[baseline][key]+=results[1][baseline][key]
                             else:
-                                corrs[pairID] = np.concatenate([corrs[pairID],results[1][pairID][np.newaxis,:,:]],axis=0)
-                                offsets[pairID] = np.concatenate([offsets[pairID],results[3][pairID][np.newaxis,:]],axis=0)
-                    if i+nCorr<groupSize:
-                        procs[i+nCorr].correlate([masks,
-                                                  poptT,poptF,
-                                                  corrWidth,
-                                                  nSearch,
-                                                  predictedDelays[:,i+nCorr+groupStart],
-                                                  self.config["Correlating"].getboolean("dmSearch",False),
-                                                  self.polyCoFreq,
-                                                  self.config["Correlating"].getboolean("dmPhase",False)])
+                                correlations.update({baseline : results[1][baseline]})
                 print(f'Correlations Complete at {(Time.now()-gs).to_value(u.min):.1f} minutes',flush=True)
-                pairID = 0 
-                for specID0 in range(len(correlationStreams)-1):
-                    for deltaID1 in range(len(correlationStreams)-specID0-1):
-                        specID1 = specID0+deltaID1+1
-                        fname = f'BURSTT_{self.sourceName}_{self.obsDate}_{groupID}_{correlationStreams[specID0].name}_{correlationStreams[specID1].name}_{self.config["Correlating"].get("dedisperse")}'
-                        if self.config["Correlating"].getboolean("dmSearch",False):
-                            fname+='_dmS'
-                        if self.config["Correlating"].getboolean("dmPhase",False):
-                            fname+='_dmP'
-                        fname+=f"_{self.config['Correlating'].getint('size',2048)}"
-                        fname+='_corr.npz'
-                        np.savez(os.path.join(self.correlationDir,fname),
-                                 corr=corrs[pairID],
-                                 corrTime=np.array(peakT[pairID]),
-                                 offsets=offsets[pairID])
-                        pairID+=1
                 print(f'Group {groupID} complete after {(Time.now()-gs).to_value(u.min):.1f} minutes',flush=True)
-        for proc in procs:
-            proc.stop()
+        finally:
+            for proc in procs:
+                proc.stop()
+            if doFull:
+                with open('data.pkl','wb') as file:
+                    pickle.dump(correlations,file)
+                for baseline in correlations.keys():
+                    result = correlations[baseline]
+                    convert_result(result)
+                    result.update({'style': 'line'})
+                    result.update({'source': SkyCoord(ra=[source.ra],dec=[source.dec])})
+                    result.update({'clockCorr': np.zeros(result['time'].shape)*u.us})
+                    time = Time(np.array([x.isot for x in result['time']]))
+                    time =  time[0] + (time-time[0]).to(u.hour).mean()
+                    time = time.datetime
+                    newName = f'{self.sourceName}_{time.year}{str(time.month).zfill(2)}{str(time.day).zfill(2)}_{str(time.hour).zfill(2)}{str(time.minute).zfill(2)}{str(time.second).zfill(2)}Z_{baseline}.npz'
+                    np.savez(os.path.join(self.correlationDir,newName),**result)
+                
 
-    def chunk_correlate(self,chunkWidth = 1*u.s,
-                        maxShift = 100,
-                        nPool = 80,
-                        doCorr = True,
-                        doFFT=True,
-                        predictDelays = True):
-        nCents = int(((self.latest-self.earliest)*u.day-chunkWidth/5.).to_value(u.s)//chunkWidth.to_value(u.s))
-        tCents = (np.linspace(0,nCents-1,nCents))*chunkWidth + self.earliest*u.day+chunkWidth/2
-        tCents = Time(tCents.to_value(u.day),format='mjd')
-        for i in range(len(self.streams)):
-            print(self.streamNames[i]+':')
-            print(f'{Time(np.nanmin(self.streams[i].blockStart).value,format="unix").isot}-{Time(np.nanmax(self.streams[i].blockStart).value,format="unix").isot}')
-            print('--------')
-        print('Chunks:')
-        print(f'{tCents[0].isot}-{tCents[-1].isot}')
-
+    def chunk_correlate(self):
+        ## Number of coarse shifts on either side of the expected value to search
+        nSearch = self.config['Correlating'].getint('nSearch',1)
+        ## Number of parallel processes
+        nPool = self.config['Correlating'].getint('nPool',80)
+        ## Number of groups to skip at the start
+        skipNum = self.config['Correlating'].getint('nSkip',0)
+        ## Maximum number of groups to run
+        runNum = self.config['Correlating'].getint('nRun',999999)
+        ## Perform coherent dedispersion on data
+        coherent = self.config['Correlating'].getboolean('coherentDD',True)
+        ## Plot output
+        makePlots = self.config['Correlating'].getboolean('makePlots',False)
+        ## Save cropped dedispersed data
+        saveCuts = self.config['Correlating'].getboolean('saveCuts',False)
+        ## dDM0 range to search overf in correlator
+        dDMRange = self.config['Correlating'].getfloat('dDM',5e-6)*u.pc/u.cm**3
+        ## Number of rates to search over
+        nRate = self.config['Correlating'].getint('nRate',101)
+        ## Number of sub pixel tau shifts
+        nSub = self.config['Correlating'].getint('nSub',11)
+        ## Maximum rate to look at
+        rateRange = self.config['Correlating'].getfloat('rateRange',1e-6)*u.s*u.Hz
+        ## Do full rate-dDM search
+        doFull = self.config['Correlating'].getboolean('doFull',False)
+        ## Names of streams to be correlated
         correlationStreamNames = np.array(self.config['Correlating'].get('streams').split(','))
+        ## Save intensities
+        saveI = self.config['Correlating'].getboolean('saveI',False)
+        meanSub = self.config['Correlating'].getboolean('meanSub',False)
+
+         ## Dictionary to store results
+        correlations = {}
+
+        source = SkyCoord.from_name(self.sourceName)
+
+        chunkWidth = self.config['Correlating'].getint('chunkWidth',0)
+        chunkWidth = 2*(chunkWidth//2)
+        if chunkWidth>0:
+            chunkTime = self.streams[0].frameSec*chunkWidth
+        else:
+            chunkTime = self.config['Correlating'].getfloat('chunkTime',1)*u.s
+            chunkWidth = int((chunkTime//(self.streams[0].frameSec)).to_value(u.dimensionless_unscaled))
+            chunkWidth = 2*(chunkWidth//2)
+            chunkTime = self.streams[0].frameSec*chunkWidth
+        totalFrames = (self.streams[0].blockStart.max()+self.streams[0].blockFrame-self.streams[0].blockStart[0,0,0])
+        nChunk = totalFrames//chunkWidth
+        chunkOffset = (totalFrames - (nChunk*chunkWidth))//2
+
+
         correlationStreams = []
         for name in correlationStreamNames:
             for i in range(self.streamNames.shape[0]):
                 if self.streamNames[i]==name:
                     correlationStreams.append(self.streams[i])
         correlationStations = [stream.station for stream in correlationStreams]
-        if predictDelays:
-            predictedDelays = np.round((self.predict_delay(tCents,correlationStations)/self.streams[0].frameSec).to_value(u.dimensionless_unscaled)).astype(int)
-        else:
-            predictedDelays = np.zeros((self.nBaselines,tCents.shape[0]),dtype=int)
 
-        groups = int(tCents.shape[0]//nPool) +1
+        groups = int(nChunk//nPool) +1
         procs = []
         if self.verbose:
             print('Building Proccesses')
@@ -500,106 +468,63 @@ class Observation:
             procs.append(SingleChunkProcess(i,self.verbose))
         for p in procs:
             p.start()
+            p.load_calc()
+            p.front_pipe.recv()
             p.give_obs(correlationStreams)
             p.front_pipe.recv()
 
         
+        try: 
+            for groupID in range(groups):
+                ## Skip specified groups (mostly for testing)
+                if groupID<skipNum or groupID>=skipNum+runNum:
+                    continue
+                if self.verbose:
+                    print(f'Start group {groupID}')
+                gs = Time.now()
+                ## Determine group Indexes
+                groupStart = groupID*nPool
+                groupSize = min(nPool,nChunk-groupStart)
             
-        for groupID in range(groups):
-            if self.verbose:
-                print(f'Start group {groupID}')
-            gs = Time.now()
-            ## Determine group Indexes
-            groupStart = groupID*nPool
-            groupSize = min(nPool,tCents.shape[0]-groupStart)
-        
-            ## Load Data
-            for i in range(groupSize):
-                procs[i].load_data([tCents[i+groupStart],chunkWidth/2])
-            if self.verbose:
-                print(f'Reads Started at {(Time.now()-gs).to_value(u.min):.1f} minutes',flush=True)
-            ## Read data from each process as it becomes available
-            for i in range(groupSize):
-                results = procs[i].front_pipe.recv()
-                if i == 0: 
-                    I = results[1]
-                    var = results[2]
-                else:
-                    for obsID in range(len(correlationStreams)):
-                        I[obsID] += results[1][obsID]
-                        var[obsID] += results[2][obsID]
-            if self.verbose:
-                print(f'Reads Complete at {(Time.now()-gs).to_value(u.min):.1f} minutes',flush=True)
-            ## Finalize Averaging
-            I = [x/groupSize for x in I]
-            Imeds = [x.mean(0) for x in I]
-            for streamID in range(len(correlationStreams)):
-                var[streamID]/=Imeds[streamID]**2
-            var2 = [sigma_clip(x, sigma=2.0) for x in var]
-            masks = [x.mask for x in var2]
-            for streamID in range(len(correlationStreams)):
-                I[streamID].mask = masks[streamID].reshape((-1,masks[streamID].shape[0]))
-                I[streamID] = np.reshape(I[streamID]/Imeds[streamID],(I[streamID].shape[0],-1,32)).mean(2)
-            ## Make Plots
-            for streamID,stream in enumerate(correlationStreams):
-                grid = plt.GridSpec(nrows=4,ncols=4)
-                plotTime = np.linspace(0,I[streamID].shape[0]*400-1,
-                                       I[streamID].shape[0]*400)*stream.frameSec.to(u.ms)
-                plotTime = np.reshape(plotTime,(-1,400)).mean(1)
-                plotFreq = np.reshape(stream.freq,(-1,32)).mean(1)
-                ext = ext_find(plotTime,plotFreq)
-                plt.figure(figsize=(6,6))
-                plt.subplot(grid[:3,:3])
-                plt.imshow(I[streamID].T,
-                           origin='lower',aspect='auto'
-                           ,vmin=2-(I[streamID][:,:20].mean(1).max()),vmax=I[streamID][:,:20].mean(1).max(),
-                           extent=ext)
-                plt.ylabel('Freq (MHz)')
-                plt.xticks([])
-                plt.subplot(grid[-1,:3])
-                plt.plot(plotTime,I[streamID][:,:20].mean(1))
-                plt.xlabel('Time (ms)')
-                plt.ylabel('I')
-                plt.xlim(ext[:2])
-                plt.subplot(grid[:3,-1])
-                plt.plot(var[streamID],stream.freq)
-                plt.plot(var2[streamID],stream.freq)
-                plt.xlabel('Variance')
-                plt.tight_layout()
-                plt.savefig(os.path.join(self.plotDir,f'BURSTT_{self.sourceName}_{self.obsDate}_{groupID}_{stream.name}_I.png'))
-                # np.savez(os.path.join(self.intensityDir,f'BURSTT_{self.sourceName}_{self.obsDate}_{groupID}_{station.station}_I_{self.ddis}.npz'),I=I[stationID],f=station.freq,t=plotTime)
-            if doCorr:
-                for procID,proc in enumerate(procs[:min(40,groupSize)]):
-                    proc.correlate([masks,2*maxShift,doFFT,predictedDelays[:,procID+groupStart,Imeds]])
-                print(f'Correlations Started at {(Time.now()-gs).to_value(u.min):.1f} minutes',flush=True)
-                for i,p in enumerate(procs[:groupSize]):
-                    results = p.front_pipe.recv()
-                    if i == 0:
-                        corrs = results[1]
-                        offsets = results[2]
-                    else:
-                        for pairID in range(len(results[1])):
-                            if i==1:
-                                corrs[pairID] = np.concatenate([corrs[pairID][np.newaxis,:,:],results[1][pairID][np.newaxis,:,:]],axis=0)
-                                offsets[pairID] = np.concatenate([offsets[pairID][np.newaxis,:],results[2][pairID][np.newaxis,:]],axis=0)
+                ## Load Data
+                if self.verbose:
+                    print(f'Reads Started after {(Time.now()-gs).to_value(u.min):.1f} minutes coherent is {coherent}',flush=True)
+                for i in range(groupSize):
+                    chunkID = groupStart + i
+                    procs[i].load_data([chunkID,chunkOffset,chunkWidth,source,nSearch,coherent])
+                for i in range(groupSize):
+                    procs[i].front_pipe.recv()
+                    
+                    procs[i].correlate([source,nSearch,doFull,makePlots,saveCuts,groupID,nRate,dDMRange,rateRange,nSub,meanSub])
+                    if i ==0:
+                        print(f'Correlations Started after {(Time.now()-gs).to_value(u.min):.1f} minutes',flush=True)
+                for i in range(groupSize):
+                    results = procs[i].front_pipe.recv()
+                    if results[0]=='data correlated':
+                        for baseline in results[1].keys():
+                            if baseline in correlations.keys():
+                                for key in results[1][baseline].keys():
+                                    correlations[baseline][key]+=results[1][baseline][key]
                             else:
-                                corrs[pairID] = np.concatenate([corrs[pairID],results[1][pairID][np.newaxis,:,:]],axis=0)
-                                offsets[pairID] = np.concatenate([offsets[pairID],results[2][pairID][np.newaxis,:]],axis=0)
-                    if i+40<groupSize:
-                        procs[i+40].correlate([masks,2*maxShift,doFFT,predictedDelays[:,i+40+groupStart]])
-                print(f'Correlations Complete at {(Time.now()-gs).to_value(u.min):.1f} minutes',flush=True)
-                pairID = 0 
-                for specID0 in range(len(correlationStreams)-1):
-                    for deltaID1 in range(len(correlationStreams)-specID0-1):
-                        specID1 = specID0+deltaID1+1
-                        np.savez(os.path.join(self.correlationDir,f'BURSTT_{self.sourceName}_{self.obsDate}_{groupID}_{correlationStreams[specID0].name}_{correlationStreams[specID1].name}_corr.npz'),
-                                 corr=corrs[pairID],
-                                 corrTime=(tCents-correlationStreams[0].epoch0).to_value(u.s),
-                                 offsets=offsets[pairID])
-                        pairID+=1
-                print(f'Group {groupID} complete after {(Time.now()-gs).to_value(u.min):.1f} minutes',flush=True)
-        for proc in procs:
-            proc.stop()
+                                correlations.update({baseline : results[1][baseline]})
+                print(f'Group {groupID} complete in {(Time.now()-gs).to_value(u.min):.1f} minutes',flush=True)
+        finally:
+            for proc in procs:
+                proc.stop()
+            if doFull:
+                with open('data.pkl','wb') as file:
+                    pickle.dump(correlations,file)
+                for baseline in correlations.keys():
+                    result = correlations[baseline]
+                    convert_result(result)
+                    result.update({'style': 'point'})
+                    result.update({'source': SkyCoord(ra=[source.ra],dec=[source.dec])})
+                    result.update({'clockCorr': np.zeros(result['time'].shape)*u.us})
+                    time = Time(np.array([x.isot for x in result['time']]))
+                    time =  time[0] + (time-time[0]).to(u.hour).mean()
+                    time = time.datetime
+                    newName = f'{self.sourceName}_{time.year}{str(time.month).zfill(2)}{str(time.day).zfill(2)}_{str(time.hour).zfill(2)}{str(time.minute).zfill(2)}{str(time.second).zfill(2)}Z_{baseline}.npz'
+                    np.savez(os.path.join(self.correlationDir,newName),**result)
 
 
     def get_clock_correction(self,times,station0='FUS',station1='LTN'):

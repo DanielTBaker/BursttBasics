@@ -47,7 +47,8 @@ class BeamFormer(widgets.Tab):
                        'targetIP',
                        'stationID',
                        'calFormat',
-                       'saveDir'
+                       'saveDir',
+                       'stationAngle'
                       ]
         for s in stationPars:
             getattr(self.stationTab,s).observe(self.change_station_settings,names='value')
@@ -224,6 +225,8 @@ class BeamFormer(widgets.Tab):
             new*=u.MHz
         if "sep" in name:
             new*=u.m
+        if 'Angle' in name:
+            new*=u.deg
         if name == 'beamform':
             new = getattr(bf,new)
         setattr(self.station,name,new)
@@ -374,7 +377,7 @@ class WidgetTable(widgets.VBox):
         return table
     
 class StationProperties(widgets.GridspecLayout):
-    def __init__(self,n_columns=3,n_rows = 16,**kwargs):
+    def __init__(self,n_columns=3,n_rows = 17,**kwargs):
         super().__init__(n_columns=n_columns,n_rows = n_rows,**kwargs)
         currentRow = 0
         self[currentRow,:] = widgets.Label('General' )
@@ -386,11 +389,13 @@ class StationProperties(widgets.GridspecLayout):
         self.bwBox = widgets.HBox()
         self.bwBox.children = [self.bwLimit,self.Mlabel]
         self.saveDir = widgets.Text(description='saveDir',continuous_update=False)
+        self.targetUser = widgets.Text(description='Username',continuous_update=False)
         self[currentRow,0]=self.stationID
         self[currentRow,1]=self.targetIP
         self[currentRow,2]=self.bwBox
         currentRow+=1
-        self[currentRow,:]=self.saveDir
+        self[currentRow,0]=self.saveDir
+        self[currentRow,1]=self.targetUser
         currentRow+=1
         self[currentRow,:] = widgets.Label('Geometry' )
         currentRow+=1
@@ -401,6 +406,7 @@ class StationProperties(widgets.GridspecLayout):
         self.sepX = widgets.FloatText(value=1.0,description='sepX',continuous_update=False)
         self.sepY = widgets.FloatText(value=0.5,description='sepY',continuous_update=False)
         self.skipRows = widgets.IntsInput(description = 'skipRows',value=[],min=0,max=15,allow_duplicates=False)
+        self.stationAngle = widgets.FloatText(value=3.0,description='stationAngle')
         self.nRow.observe(self.update_skip_row_max,names='value')
         self[currentRow,0]=self.nAnt
         self[currentRow,1]=self.nRow
@@ -410,6 +416,8 @@ class StationProperties(widgets.GridspecLayout):
         currentRow+=1
         self[currentRow,0]=self.sepX
         self[currentRow,1]=self.sepY
+        currentRow+=1
+        self[currentRow,:]= self.stationAngle
         currentRow+=1
         self[currentRow,:]= widgets.Label('Skip Rows:')
         currentRow+=1
@@ -464,6 +472,7 @@ class StationProperties(widgets.GridspecLayout):
         self.yBeam0.value = conf['Geometry'].getfloat("yBeam0",-7.5)
         self.sepX.value = conf['Geometry'].getfloat("sepX",1.0)
         self.sepY.value = conf['Geometry'].getfloat("sepY",0.5)
+        self.stationAngle.value = conf['Geometry'].getfloat('stationAngle',-3.) 
 
         self.nChan.value = conf['Spectral'].getint("nChan",1024)
         self.nOrder.value = conf['Spectral'].getint("nOrder",8)
@@ -483,6 +492,8 @@ class StationProperties(widgets.GridspecLayout):
         self.targetIP.value = conf['General']['transferIP']
         self.bwLimit.value = conf['General'].getint('bwLimit',1)
         self.saveDir.value = conf['General'].get('saveDir','./')
+        self.targetUser.value = conf['General'].get('username',os.getlogin())
+        
 
 
 
@@ -506,7 +517,7 @@ class BeamFormerRun(widgets.VBox):
         self.accordion = widgets.Accordion()
         
         self.baseTab = widgets.VBox()
-        self.baseBox = widgets.GridspecLayout(n_columns=3,n_rows =6)
+        self.baseBox = widgets.GridspecLayout(n_columns=5,n_rows =6)
         self.baseOut = widgets.Output()
         self.baseDM = widgets.FloatText(value=0,description='DM',layout=widgets.Layout(width='25ch'))
         self.baseBeam = widgets.IntText(value=0,min=0,max=255,description='beamID',layout=widgets.Layout(width='25ch'))
@@ -514,16 +525,20 @@ class BeamFormerRun(widgets.VBox):
         self.baseTimeOff = widgets.FloatText(value = 0, description = 'ep0 Offset',layout=widgets.Layout(width='25ch'))
         self.baseRun = widgets.Button(description = 'RUN',layout=widgets.Layout(width='25ch'))
         self.baseRebin = widgets.IntText(value=400,min=1,description='Time Rebin',layout=widgets.Layout(width='25ch'))
-        self.baseSourceType = widgets.Dropdown(description='Source Type:',options=['Beam','Target'],value='Beam')
+        self.baseSourceType = widgets.Dropdown(description='Source Type:',options=['Beam','Target','Coord'],value='Beam')
         self.baseSourceType.observe(self.update_base_source,names='value')
         self.yOffset = widgets.FloatText(description='Y Offset:',value=0,layout=widgets.Layout(width='25ch'))
         self.baseBeamTest = widgets.Button(description='Test Beam',layout=widgets.Layout(width='25ch'))
         self.baseBeamTest.on_click(self.test_beam)
         self.baseTargetName = widgets.Combobox(description='Target:',options=['B0531+21','B0329+54','3C147','3C48','3C273'])
         self.baseTargetName.observe(self.base_target_change,names='value')
+        self.baseTargetRA = widgets.FloatText(description='RA:',value=0,layout=widgets.Layout(width='25ch'))
+        self.baseTargetDEC = widgets.FloatText(description='DEC:',value=0,layout=widgets.Layout(width='25ch'))
         self.firstOnly = widgets.Checkbox(description = 'First Beamform (Column)')
         self.allFirst = widgets.Checkbox(description = 'All First')
+        self.onSource = widgets.Checkbox(description = 'On Source')
         self.skipOrders = widgets.IntsInput()
+        self.transferTarget = widgets.Text(description='Transfer Target',continuous_update=False)
         self.baseBox[0,0]=self.baseDM
         self.baseBox[0,1]=self.baseSecWin
         self.baseBox[0,2]=self.baseTimeOff
@@ -534,7 +549,9 @@ class BeamFormerRun(widgets.VBox):
         self.baseBox[4,:]=self.skipOrders
         self.baseBox[5,0]=self.firstOnly
         self.baseBox[5,1]=self.allFirst
-        self.baseBox[5,2]=self.baseRun
+        self.baseBox[5,2]=self.onSource
+        self.baseBox[5,3]=self.transferTarget
+        self.baseBox[5,4]=self.baseRun
         self.baseTab.children = [self.baseBox,self.baseOut]
         self.baseRun.on_click(self.run_base)
 
@@ -674,13 +691,14 @@ class BeamFormerRun(widgets.VBox):
             self.profile = self.station.fold_on_target(self.eventFiles,
                                                   self.ep0.value,
                                                   period = self.foldPeriod.value*u.s,
-                                                  DM = self.foldDM.value,
+                                                  DM = self.foldDM.value*u.pc/u.cm**3,
                                                   nBins = self.foldBins.value,**kwargs)
-            self.profile[self.profile==0]=np.nan
-            self.profile/=np.nanmean(self.profile,1)[:,np.newaxis]
-            v = np.nanvar(self.profile,1)
+            tempProf = np.copy(self.profile)
+            # self.profile[self.profile==0]=np.nan
+            tempProf/=np.nanmean(tempProf,1)[:,np.newaxis]
+            v = np.nanvar(tempProf,1)
             v2 = sigma_clip(v,2)
-            self.profile[v2.mask]=np.nan
+            tempProf[v2.mask]=np.nan
             y = self.station.freq.value
             dy=y[1]-y[0]
             self.foldOut.clear_output()
@@ -688,16 +706,16 @@ class BeamFormerRun(widgets.VBox):
             grid=plt.GridSpec(nrows=2,ncols=1,height_ratios=[4,1],hspace=0)
             plt.figure()
             plt.subplot(grid[0])
-            plt.imshow(self.profile,origin='lower',aspect='auto',
+            plt.imshow(tempProf,origin='lower',aspect='auto',
                        extent = ext,
-                       vmin=1,vmax=1+2*np.nanstd(self.profile))
+                       vmin=1,vmax=1+2*np.nanstd(tempProf))
             plt.ylabel('Freq (MHz)')
             plt.xticks([])
             plt.subplot(grid[1])
             SNR = np.nanmean(self.profile,0)
             SNR -= np.nanmedian(SNR)
             SNR /= np.nanstd(SNR)
-            plt.plot(np.linspace(-.5,.5,2*self.profile.shape[1]+1)[1:-1:2],SNR)
+            plt.plot(np.linspace(-.5,.5,2*tempProf.shape[1]+1)[1:-1:2],SNR)
             plt.xlim(-.5,.5)
             plt.xlabel('Pulse Phase')
             plt.ylabel('SNR')
@@ -727,16 +745,24 @@ class BeamFormerRun(widgets.VBox):
                 try:
                     test = SkyCoord.from_name(self.baseTargetName.value)
                     targetBeam = determine_beam(test,Time(self.ep0.value,scale='utc'))
+                    srceName = self.baseTargetName.value
                 except:
                     try:
                         test = SkyCoord.from_name(f'PSR {self.baseTargetName.value}')
                         targetBeam = determine_beam(test,Time(self.ep0.value,scale='utc'))
+                        srceName = f'PSR {self.baseTargetName.value}'
                     except:
                         print('Source Not Found')
                         return
+            if self.baseSourceType.value == 'Coord':
+                    test = SkyCoord(ra=self.baseTargetRA.value*u.deg,dec=self.baseTargetDEC.value*u.deg)
+                    targetBeam = determine_beam(test,Time(self.ep0.value,scale='utc'))
             if self.allFirst.value:
                 transfer = {}
-                transfer.update({'jacob':[]})
+                target = self.transferTarget.value
+                if target == '':
+                    target = 'jacob'
+                transfer.update({target:[]})
                 for beamIDX in range(self.station.nAnt):
                     for beamIDY in range(self.station.nRow):
                         ddSpec,ep0,beamIDX,beamIDY,hasData = self.station.beamform_event_first(self.eventFiles,beamIDX,beamIDY,
@@ -754,13 +780,13 @@ class BeamFormerRun(widgets.VBox):
                                 free = free/(2**30)
                                 if free<10:
                                     raise Exception(f'Insufficent Space in {self.station.saveDir}')
-                                transfer.update({'jacob':[]})
+                                transfer.update({target:[]})
                             ddTime = np.arange(ddSpec.shape[1])*self.station.timeFrame # time offset of each frame
                             out_name = f'baseband_first_dedisperse_{self.station.stationID}_{self.eventID.value}_{beamIDX}_{beamIDY}.npz'
                             np.savez(os.path.join(self.station.saveDir,out_name), freq=self.station.freq, ep0=ep0,
                                     dd_time=ddTime, dd_spec=ddSpec, ep_event=self.ep0.value,
                                     DM=self.baseDM.value, beamid_x=beamIDX, beamid_y=beamIDY)
-                            transfer['jacob'].append(os.path.join(self.station.saveDir,out_name))
+                            transfer[target].append(os.path.join(self.station.saveDir,out_name))
                 transfer_data(transfer,self.station)
             elif self.firstOnly.value:
                 self.baseOut.clear_output()
@@ -783,7 +809,40 @@ class BeamFormerRun(widgets.VBox):
                     else:
                         print(f'{self.eventID.value} has no Data')
                         break
+            elif self.onSource.value and self.baseSourceType.value in ['Target','Coord']:
+            
+                print('Form On Source')
+                if self.baseSourceType.value == 'Target':
+                    ddSpec,ep0,beamIDX,beamIDY,hasData = self.station.beamform_event_onsource(self.eventFiles,
+                                                        srceName,
+                                                        self.baseDM.value,self.ep0.value,
+                                                        secWin = self.baseSecWin.value*u.s,
+                                                        timeOffset = self.baseTimeOff.value*u.s,
+                                                        skipOrder = self.skipOrders.value,
+                                                        thetaYOff = self.yOffset.value*u.deg
+                                                        )
+                else:
+                    ddSpec,ep0,beamIDX,beamIDY,hasData = self.station.beamform_event_onsource(self.eventFiles,
+                                                        'Coord',
+                                                        self.baseDM.value,self.ep0.value,
+                                                        secWin = self.baseSecWin.value*u.s,
+                                                        timeOffset = self.baseTimeOff.value*u.s,
+                                                        skipOrder = self.skipOrders.value,
+                                                        thetaYOff = self.yOffset.value*u.deg,
+                                                        ra = self.baseTargetRA.value*u.deg,
+                                                        dec = self.baseTargetDEC.value*u.deg
+                                                        )
+                # self.baseOut.clear_output()
+                if hasData:
+                    ddTime = np.arange(ddSpec.shape[1])*self.station.timeFrame # time offset of each frame
+                    out_name = f'baseband_beamform_dedisperse_{self.station.stationID}_{self.eventID.value}_{targetBeam}.npz'
+                    np.savez(os.path.join(self.station.saveDir,out_name), freq=self.station.freq, ep0=ep0,
+                            dd_time=ddTime, dd_spec=ddSpec, ep_event=self.ep0.value,
+                            DM=self.baseDM.value, beamid_x=beamIDX, beamid_y=beamIDY)
                     
+                    plot_spectrum(ddSpec,self.station.freq,ddTime.to(u.ms),self.baseOut,title=self.eventID.value)
+                else:
+                    print(f'{self.eventID.value} has no Data')
             else:
                 ddSpec,ep0,beamIDX,beamIDY,hasData = self.station.beamform_event(self.eventFiles,targetBeam,
                                                             self.baseDM.value,self.ep0.value,
@@ -792,7 +851,7 @@ class BeamFormerRun(widgets.VBox):
                                                             skipOrder = self.skipOrders.value,
                                                             thetaYOff = self.yOffset.value*u.deg
                                                             )
-                self.baseOut.clear_output()
+                # self.baseOut.clear_output()
                 if hasData:
                     ddTime = np.arange(ddSpec.shape[1])*self.station.timeFrame # time offset of each frame
                     out_name = f'baseband_beamform_dedisperse_{self.station.stationID}_{self.eventID.value}_{targetBeam}.npz'
@@ -813,6 +872,9 @@ class BeamFormerRun(widgets.VBox):
         if change['new'] == 'Target':
             self.baseBox[2,1]=self.baseTargetName
             self.baseBox[2,2]=self.baseBeamTest
+        if change['new'] == 'Coord':
+            self.baseBox[2,1]=self.baseTargetRA
+            self.baseBox[2,2]=self.baseTargetDEC
             
 
 class CSVTab(widgets.VBox):
@@ -961,7 +1023,7 @@ class TransferWindow (widgets.VBox):
         values = self.files.value
         options = list(self.files.options)
         for file in values:
-            os.system(f'rm {file}')
+            os.system(f'rm {os.path.join(self.station.saveDir,file)}')
             options.remove(file)
         self.files.options = options
         self.files.value = []

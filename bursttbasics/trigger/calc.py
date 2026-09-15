@@ -13,10 +13,13 @@ def dump_delay(stations,source,mode='center',decOff=0,raOff=0,**kwargs):
     if 'time' in kwargs:
         epoch=kwargs['time']
     else:
-        if isinstance(stations[0].ep0,np.ndarray):
-            epoch = Time(Time(stations[0].ep0[0],format='unix').isot)
+        if stations[0].ep0Time:
+            epoch = stations[0].ep0[0]
         else:
-            epoch = Time(Time(stations[0].ep0,format='unix').isot)
+            if isinstance(stations[0].ep0,np.ndarray):
+                epoch = Time(Time(stations[0].ep0[0],format='unix').isot)
+            else:
+                epoch = Time(Time(stations[0].ep0,format='unix').isot)
     coords = []
     for station in stations:
         if hasattr(station,'location'):

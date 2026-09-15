@@ -51,7 +51,7 @@ class StationDump:
         """
             Load the data file
         """
-        arch = np.load(self.file)
+        arch = np.load(self.file, allow_pickle=True)
         self.spec = arch['dd_spec']
         self.freq = arch['freq']*u.MHz
         if len(arch['ep0'].shape)==0 and 'ep' in arch.files:
@@ -62,9 +62,28 @@ class StationDump:
         if len(self.ep0.shape)==0:
             self.ep0=float(self.ep0)
         self.time = arch['dd_time']*u.us
-        self.modeled = False
-        self.normed = False
-        self.clipped = False
+        if 'normed' in arch.files:
+            self.normed = arch['normed'].item()
+        else:
+            self.normed = False
+        if 'clipped' in arch.files:
+            self.clipped = arch['clipped'].item()
+        else:
+            self.clipped = False
+        if 'ep0Time' in arch.files:
+            self.ep0Time = arch['ep0Time'].item()
+            if self.ep0Time:
+                self.ep0=Time(self.ep0)
+        else:
+            self.ep0Time = False
+        if 'poptT' in arch.files:
+            self.poptT = arch['poptT']
+            self.poptF = arch['poptF']
+            self.profModel = globals()[arch['profModel'].item()]
+            self.freq_function = globals()[arch['freq_function'].item()]
+            self.modeled=True
+        else:
+            self.modeled = False
 
     def load_event(self,baseDir,eventID,beam,oldVersion=False,sharedDir=False):
         """
@@ -110,7 +129,7 @@ class StationDump:
             A = prof.max()-N
             w = 10*(t2[1]-t2[0]).value
             self.poptT = np.array([A,t0,w,N])
-        print(prof.max())
+        # print(prof.max())
         self.poptT,pcov=curve_fit(self.profModel,t2.value,prof,p0=self.poptT)
         wts = self.profModel(self.time.to_value(u.ms),*self.poptT)-self.poptT[-1]
         wts /= np.nansum(wts)
@@ -222,6 +241,78 @@ class StationDump:
         plt.yticks([])
         plt.axvline(0,ls='--',c='k',alpha=.5)
 
+    def up_channelize(self,upChan = 8):
+        self.spec =np.moveaxis(np.fft.fftshift(np.fft.fft(np.reshape(self.spec[:,:upChan*(self.spec.shape[1]//upChan)],(self.spec.shape[0],-1,upChan)),axis=-1),axes=-1),2,1).reshape((self.spec.shape[0]*upChan,-1))
+        self.time = np.reshape(self.time[:,upChan*self.spec.shape[1]],(-1,upChan)).mean(1)
+        self.freq = np.linspace(self.freq[0].value,self.freq[-1]+(self.freq[1]-self.freq[0]),upChan*self.freq.shape[0],endpoint=False)
+        self.ep0 = np.repeat(self.ep0,upChan)
+
+    def save(self,eventID,beam,dir='./'):
+        if self.modeled:
+            np.savez(os.path.join(dir,f'baseband_beamform_dedisperse_{self.station}_{eventID}_{beam}.npz'),
+                    dd_spec = self.spec,
+                    freq = self.freq.to_value(u.MHz),
+                    ep0 = self.ep0,
+                    dd_time = self.time.to_value(u.us),
+                    DM = self.DM.to_value(u.pc/u.cm**3),
+                    normed = self.normed,
+                    clipped = self.clipped,
+                    ep0Time = self.ep0Time,
+                    profModel = self.profModel.__name__,
+                    freq_function = self.freq_function.__name__,
+                    poptT = self.poptT,
+                    poptF = self.poptF
+                    )
+        else:
+            np.savez(os.path.join(dir,f'baseband_beamform_dedisperse_{self.station}_{eventID}_{beam}.npz'),
+                                dd_spec = self.spec,
+                                freq = self.freq.to_value(u.MHz),
+                                ep0 = self.ep0,
+                                dd_time = self.time.to_value(u.us),
+                                DM = self.DM.to_value(u.pc/u.cm**3),
+                                normed = self.normed,
+                                clipped = self.clipped,
+                                ep0Time = self.ep0Time,
+                                )
+
+    def align_start(self,newEp0,fractionalShift=False):
+        """
+        Parameters
+        ----------
+        newEp0 : astropy.Time
+            The desired start time for each frequency
+        fractionalShift : bool (optional)
+            Whether or not to do sub pixel shifts in each channel. Defaults to False
+        Returns
+        -------
+        None
+        """
+        dtype = self.spec.dtype
+        # Determine time spacing of samples
+        sampleSpacing = self.time[1]-self.time[0]
+        ## Determine desired shift in samples
+        shift = ((newEp0-self.ep0)/sampleSpacing).to_value(u.dimensionless_unscaled)
+        ## Divide shift into pixel and sub pixel settings
+        coarseShift = np.round(shift).astype(int)
+        fineShift = shift-coarseShift
+        ## Apply pixel shifts
+        for i in range(self.freq.shape[0]):
+                        self.spec[i]=np.roll(self.spec[i],-coarseShift[i])
+        self.ep0+=coarseShift*sampleSpacing
+        ## Apply sub pixel shifts if desired
+        if fractionalShift:
+            f = np.fft.fftfreq(self.time.shape[0])
+            Fspec =np.fft.fft(self.spec,axis=1)
+            Fspec *= np.exp(1j*2*np.pi*(fineShift[:,np.newaxis]*f))
+            self.ep0+=fineShift*sampleSpacing
+            ## Crop spectra and time
+            self.spec = np.fft.ifft(Fspec,axis=1)[:,:-1].astype(dtype)
+            self.time = self.time[:-1]
+        ## Crop spectra and time
+        if coarseShift.max()>0:
+            self.time = self.time[:-(coarseShift.max())]
+            self.spec = self.spec[:,:-(coarseShift.max())]
+
 def get_mean_overlap(station0,station1):
     """
     Determine mean of frequency overlap between two stations
@@ -251,6 +342,9 @@ def get_start_off(station0,station1):
     """
     t0 = station0.ep0
     t1 = station1.ep0
+    if isinstance(t0,Time) and isinstance(t1,Time):
+        use0,use1 = get_overlap_mask(station0,station1)
+        return((t0[use0][0]-t1[use1][0]).to(u.us))
     if isinstance(t0,np.ndarray) and isinstance(t1,np.ndarray):
         use0,use1 = get_overlap_mask(station0,station1)
         t1=Time(t1[use1][0],format='unix')
