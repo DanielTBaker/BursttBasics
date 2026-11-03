@@ -12,13 +12,21 @@ import shutil
 class BeamFormer(widgets.Tab):
     def __init__(self,config,**kwargs):
         super().__init__(**kwargs)
+        print(1)
         self.station = Station()
+        # print(2)
         self.make_station_tab()
+        # print(3)
         self.stationTab.load_ini(config)
+        # print(4)
         self.singleTab = BeamFormerRun(self.station)
+        # print(5)
         self.csvTab = CSVTab()
+        # print(6)
         self.csvTab.run.on_click(self.csv_run)
+        # print(7)
         self.csvTab.foldRun.on_click(self.csv_fold)
+        # print(8)
         self.transferTab = TransferWindow(self.station)
         self.children = [self.stationTab,self.singleTab,self.csvTab,self.transferTab]
         self.titles = ['Station','Single','CSV','Transfer']
@@ -501,12 +509,20 @@ class StationProperties(widgets.GridspecLayout):
 class BeamFormerRun(widgets.VBox):
     def __init__(self,station,**kwargs):
         super().__init__(**kwargs)
-        self.dataFolders = sorted(glob("/burstt[0-9]/disk*/*data*")+glob("/burstt1[0-9]/disk*/*data*"))
+        self.dataFolders = []
+        for drive in range(20):
+            if os.path.isdir(f'/burstt{drive}'):
+                if os.path.isdir(f'/burstt{drive}/disk1'):
+                    self.dataFolders+=glob(f"/burstt{drive}/disk*/*data*")
+        self.dataFolders =  sorted(self.dataFolders)
         self.station=station
         self.eventBox = widgets.HBox()
         self.triggerRefresh = widgets.Button(icon='refresh',layout=widgets.Layout(width='5ch'))
         self.triggerRefresh.on_click(self.refresh_triggers)
-        events = np.sort(np.unique(np.array([x.split('/')[-1][6:-12] for x in glob("/burstt[0-9]/disk*/*data*/ring*Z.trig*")+glob("/burstt1[0-9]/disk*/*data*/ring*Z.trig*")])))
+        
+        events = np.sort(np.unique(np.array([x.split('/')[-1][6:-12] for x in sum([glob(f'{df}/ring*Z.trig*') for df in self.dataFolders],[])])))
+        if self.station.nRow == 1 and events.shape[0]==0:
+            events = np.sort(np.unique(np.array([x.split('/')[-1].split('.')[1] for x in sum([glob(f'{df}/fpga*Z.bin') for df in self.dataFolders],[])])))
         self.eventID = widgets.Dropdown(options=events,value=events[0],descrition='eventID')
         self.ep0 = widgets.Text(value = time_from_event(self.eventID.value),description='ep0',continuous_update=False)
         self.eventBox.children = [self.triggerRefresh,self.eventID,self.ep0]
@@ -600,7 +616,13 @@ class BeamFormerRun(widgets.VBox):
         self.children = [self.eventBox,self.accordion]
 
     def refresh_triggers(self,click):
-        events = np.sort(np.unique(np.array([x.split('/')[-1][6:-12] for x in glob("/burstt[0-9]/disk*/*data*/ring*Z.trig*")+glob("/burstt1[0-9]/disk*/*data*/ring*Z.trig*")])))
+        self.dataFolders = []
+        for drive in range(20):
+            if os.path.isdir(f'/burstt{drive}'):
+                if os.path.isdir(f'/burstt{drive}/disk1'):
+                    self.dataFolders+=glob(f"/burstt{drive}/disk*/*data*")
+        self.dataFolders =  sorted(self.dataFolders)
+        events = np.sort(np.unique(np.array([x.split('/')[-1][6:-12] for x in sum([glob(f'{df}/ring*Z.trig*') for df in self.dataFolders],[])])))
         self.eventID.options = events
         
     def run_calibrator(self,click):
@@ -760,8 +782,11 @@ class BeamFormerRun(widgets.VBox):
             if self.allFirst.value:
                 transfer = {}
                 target = self.transferTarget.value
+                transferKwargs = {}
                 if target == '':
                     target = 'jacob'
+                else:
+                    transferKwargs.update({'dest':target})
                 transfer.update({target:[]})
                 for beamIDX in range(self.station.nAnt):
                     for beamIDY in range(self.station.nRow):
@@ -775,7 +800,7 @@ class BeamFormerRun(widgets.VBox):
                             _total,_used,free = shutil.disk_usage(self.station.saveDir)
                             free = free/(2**30)
                             if free<10:
-                                transfer_data(transfer,self.station)
+                                transfer_data(transfer,self.station,**transferKwargs)
                                 _total,_used,free = shutil.disk_usage(self.station.saveDir)
                                 free = free/(2**30)
                                 if free<10:
@@ -785,9 +810,9 @@ class BeamFormerRun(widgets.VBox):
                             out_name = f'baseband_first_dedisperse_{self.station.stationID}_{self.eventID.value}_{beamIDX}_{beamIDY}.npz'
                             np.savez(os.path.join(self.station.saveDir,out_name), freq=self.station.freq, ep0=ep0,
                                     dd_time=ddTime, dd_spec=ddSpec, ep_event=self.ep0.value,
-                                    DM=self.baseDM.value, beamid_x=beamIDX, beamid_y=beamIDY)
+                                    DM=self.baseDM.value, beamid_x=beamIDX, beamid_y=beamIDY,ep0Time=True)
                             transfer[target].append(os.path.join(self.station.saveDir,out_name))
-                transfer_data(transfer,self.station)
+                transfer_data(transfer,self.station,**transferKwargs)
             elif self.firstOnly.value:
                 self.baseOut.clear_output()
                 beamIDX,sinThetaIDY,_ =  self.station.beamIDs_from_FUS(targetBeam)
@@ -803,14 +828,13 @@ class BeamFormerRun(widgets.VBox):
                         out_name = f'baseband_first_dedisperse_{self.station.stationID}_{self.eventID.value}_{beamIDX}_{beamIDY}.npz'
                         np.savez(os.path.join(self.station.saveDir,out_name), freq=self.station.freq, ep0=ep0,
                                  dd_time=ddTime, dd_spec=ddSpec, ep_event=self.ep0.value,
-                                 DM=self.baseDM.value, beamid_x=beamIDX, beamid_y=beamIDY)
+                                 DM=self.baseDM.value, beamid_x=beamIDX, beamid_y=beamIDY,ep0Time=True)
                         
                         plot_spectrum(ddSpec,self.station.freq,ddTime.to(u.ms),self.baseOut,title=self.eventID.value)
                     else:
                         print(f'{self.eventID.value} has no Data')
                         break
             elif self.onSource.value and self.baseSourceType.value in ['Target','Coord']:
-            
                 print('Form On Source')
                 if self.baseSourceType.value == 'Target':
                     ddSpec,ep0,beamIDX,beamIDY,hasData = self.station.beamform_event_onsource(self.eventFiles,
@@ -838,7 +862,7 @@ class BeamFormerRun(widgets.VBox):
                     out_name = f'baseband_beamform_dedisperse_{self.station.stationID}_{self.eventID.value}_{targetBeam}.npz'
                     np.savez(os.path.join(self.station.saveDir,out_name), freq=self.station.freq, ep0=ep0,
                             dd_time=ddTime, dd_spec=ddSpec, ep_event=self.ep0.value,
-                            DM=self.baseDM.value, beamid_x=beamIDX, beamid_y=beamIDY)
+                            DM=self.baseDM.value, beamid_x=beamIDX, beamid_y=beamIDY,ep0Time=True)
                     
                     plot_spectrum(ddSpec,self.station.freq,ddTime.to(u.ms),self.baseOut,title=self.eventID.value)
                 else:
@@ -849,7 +873,7 @@ class BeamFormerRun(widgets.VBox):
                                                             secWin = self.baseSecWin.value*u.s,
                                                             timeOffset = self.baseTimeOff.value*u.s,
                                                             skipOrder = self.skipOrders.value,
-                                                            thetaYOff = self.yOffset.value*u.deg
+                                                            thetaYOff = self.yOffset.value*u.deg,
                                                             )
                 # self.baseOut.clear_output()
                 if hasData:
@@ -923,14 +947,19 @@ class CSVTab(widgets.VBox):
         self.children = [self.table,self.overrideBox,self.runStyle,self.tOff,self.run,self.foldTab,self.checkBox,self.output]
         
     def prune(self,click):
-        dataFolders = sorted(glob("/burstt[0-9]/disk*/*data*")+glob("/burstt1[0-9]/disk*/*data*"))
+        self.dataFolders = []
+        for drive in range(20):
+            if os.path.isdir(f'/burstt{drive}'):
+                if os.path.isdir(f'/burstt{drive}/disk1'):
+                    self.dataFolders+=glob(f"/burstt{drive}/disk*/*data*")
+        self.dataFolders =  sorted(self.dataFolders)
         clipRows = []
         for rowID,row in enumerate(self.table.table.children):
             eventID = getattr(row,'EventID').value
             epEvent = getattr(row,'Timestamp').value
             epEvent = epEvent.split('+')[0]
             ep0=Time(epEvent)
-            files = find_files(eventID,dataFolders)
+            files = find_files(eventID,self.dataFolders)
             useable = []
             for i in range(len(files)):
                 fbin = files[i]
@@ -1041,7 +1070,7 @@ class TransferWindow (widgets.VBox):
         bwLimit = f'{self.station.bwLimit}M'
         targetIP = self.station.targetIP
         targetDir = self.targetDir.value
-        destination = f'ubuntu@{targetIP}:{targetDir}'
+        destination = f'{self.station.username}@{targetIP}:{targetDir}'
         command = ["rsync", "-avhP", '--remove-source-files'] + fileList + [destination, f'--bwlimit={bwLimit}']
         print(' '.join(command))
         try:

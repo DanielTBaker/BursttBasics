@@ -54,13 +54,8 @@ class StationDump:
         arch = np.load(self.file, allow_pickle=True)
         self.spec = arch['dd_spec']
         self.freq = arch['freq']*u.MHz
-        if len(arch['ep0'].shape)==0 and 'ep' in arch.files:
-            self.ep0 = arch['ep']
-        else:
-            self.ep0 = arch['ep0']
         self.DM = arch['DM']*u.pc/u.cm**3
-        if len(self.ep0.shape)==0:
-            self.ep0=float(self.ep0)
+        
         self.time = arch['dd_time']*u.us
         if 'normed' in arch.files:
             self.normed = arch['normed'].item()
@@ -70,12 +65,21 @@ class StationDump:
             self.clipped = arch['clipped'].item()
         else:
             self.clipped = False
-        if 'ep0Time' in arch.files:
+        if 'ep0JD1' in arch:
+                        self.ep0 = Time(arch['ep0JD1'], arch['ep0JD2'], format='jd', scale=str(arch['ep0Scale']))
+                        self.ep0Time = True
+        elif 'ep0Time' in arch.files:
             self.ep0Time = arch['ep0Time'].item()
             if self.ep0Time:
                 self.ep0=Time(self.ep0)
         else:
-            self.ep0Time = False
+            self.ep0 = arch['ep0']
+            if isinstance(self.ep0[0],Time):
+                self.ep0=Time(self.ep0)
+                self.ep0Time = True
+            else:
+                self.ep0Time = False
+                self.ep0 = Time(self.ep0,format='unix')
         if 'poptT' in arch.files:
             self.poptT = arch['poptT']
             self.poptF = arch['poptF']
@@ -84,6 +88,10 @@ class StationDump:
             self.modeled=True
         else:
             self.modeled = False
+
+        self.coherentDM = False
+        self.appliedDM = 0*u.pc/u.cm**3
+        self.removedDelay = 0 * u.ns
 
     def load_event(self,baseDir,eventID,beam,oldVersion=False,sharedDir=False):
         """
@@ -174,9 +182,9 @@ class StationDump:
         """
         SNR = np.nansum(I[(self.freq.value>=freqMin)*(self.freq.value<=freqMax)],0)
         on = np.abs(t-t[np.argmax(SNR)])<=(onWidth+.1)*(t[1]-t[0])
-        if meanSub:
-            SNR -= np.mean(SNR[np.invert(on)])
         SNR/=np.nanstd(SNR[np.invert(on)])
+        if meanSub:
+            SNR -= np.median(SNR[np.invert(on)])
         return(SNR,on)
 
     def calc_spec(self,I,wts,noiseSub=False):
@@ -199,13 +207,13 @@ class StationDump:
         I2 = np.nanmean(np.reshape(I[:,:rbt*(I.shape[1]//rbt)],(self.spec.shape[0],-1,rbt)),2)
         t2 = np.reshape(self.time[:rbt*I2.shape[1]],(-1,rbt)).mean(1)
         f2 = np.reshape(self.freq,(-1,rbf)).mean(1)
-        SNR,on = self.calc_SNR(t2,I2,freqMin=freqMin,freqMax=freqMax)
+        SNR,on = self.calc_SNR(t2,I2,freqMin=freqMin,freqMax=freqMax,meanSub=True)
         if self.modeled:
             wts = self.profModel(self.time.to_value(u.ms),*self.poptT)-self.poptT[-1]
             wts/=np.nansum(wts)
             SNRF = self.calc_spec(I,wts,noiseSub=True)
         else:
-            wts = np.copy(SNR)
+            wts = np.copy(SNR-1)
             wts[np.invert(on)]=0
             wts[wts<0]=0
             wts/=np.nansum(wts)
@@ -221,14 +229,20 @@ class StationDump:
         plt.ylabel('Frequency (MHz)')
         plt.subplot(grid[0,0])
         plt.plot(t2.to(u.ms),SNR,'k')
-        plt.axhline(0,ls='--',c='k',alpha=.5)
+        # plt.axhline(0,ls='--',c='k',alpha=.5)
+        
         plt.text(t2.to(u.ms).min().value,SNR.max()*.9,f'SNR = {SNR.max():.2f}')
+        try:
+            SNR2,on = self.calc_SNR(t2,I2,freqMin=freqMin,freqMax=500*u.MHz,meanSub=True)
+            plt.text(t2.to(u.ms).min().value,SNR.max()*.9,f'SNR(<500MHz) = {SNR2.max():.2f}')
+        except:
+            pass
         if showModel and self.modeled:
             model = self.profModel(t2.to_value(u.ms),*self.poptT)-self.poptT[-1]
             # model*=SNR.max()/model.max()
             plt.plot(t2.to(u.ms),model)
         plt.axvspan(t2[on].min().value,t2[on].max().value, alpha=0.5, color='green')
-        plt.axhspan(-1,1,alpha=.5,color='grey')
+        # plt.axhspan(-1,1,alpha=.5,color='grey')
         plt.xlim(ext[:2])
         plt.xticks([])
         plt.ylabel('SNR')
@@ -312,6 +326,26 @@ class StationDump:
         if coarseShift.max()>0:
             self.time = self.time[:-(coarseShift.max())]
             self.spec = self.spec[:,:-(coarseShift.max())]
+
+    def coherent_dedis(self,skipDM=False,**kwargs):
+        upChan = self.spec.shape[1]
+        dt = self.time[1]-self.time[0]
+        dt2 = dt*upChan
+        spec2 = np.fft.fft(self.spec,axis=-1)
+        fOff = np.fft.fftfreq(upChan,d=dt).to(u.MHz)
+        phase = np.zeros(self.spec.shape)
+        if not self.coherentDM and not skipDM:
+            phase -= 2*np.pi*(self.DM/K).to_value(u.Hz)*(fOff.to_value(u.Hz)[np.newaxis,:]**2)/(self.freq.to_value(u.Hz)[:,np.newaxis]**2 * (self.freq.to_value(u.Hz)[:,np.newaxis]+fOff.to_value(u.Hz)[np.newaxis,:]))
+            self.appliedDM = self.DM*1
+            self.coherentDM = True
+        if "tauShiftAbs" in kwargs:
+            phase += 2*np.pi*((self.freq[:,np.newaxis]-fOff[np.newaxis,:])*(kwargs['tauShiftAbs']-self.removedDelay)).to_value(u.dimensionless_unscaled)
+            self.removedDelay = kwargs['tauShiftAbs']
+        if "tauShift" in kwargs:
+            phase += 2*np.pi*((self.freq[:,np.newaxis]-fOff[np.newaxis,:])*kwargs['tauShift']).to_value(u.dimensionless_unscaled)
+            self.removedDelay += kwargs['tauShift']
+        spec2*= np.exp(-1j*phase)
+        self.spec = np.fft.ifft(spec2,axis=-1).astype(np.complex64)
 
 def get_mean_overlap(station0,station1):
     """

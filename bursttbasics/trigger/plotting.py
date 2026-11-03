@@ -5,7 +5,7 @@ from ..burstt_func import ext_find
 
 def plot_corr(offsets,tau,corrs,**kwargs):
     
-    amps = np.abs(corrs)**2
+    amps = np.abs(corrs)
     grid=plt.GridSpec(nrows=2,ncols=2,width_ratios=[4,1],height_ratios=[4,1],wspace=0,hspace=0)
     ext = ext_find(offsets*2.56*u.us,tau)
     plt.figure()
@@ -17,7 +17,7 @@ def plot_corr(offsets,tau,corrs,**kwargs):
     plt.plot(offsets*2.56,amps.max(0))
     plt.xlim(ext[:2])
     plt.xlabel('Coarse Shift (us)')
-    plt.ylabel('Max')
+    plt.ylabel('Peak SNR')
     if 'expected' in kwargs:
         if isinstance(kwargs['expected'],list) or isinstance(kwargs['expected'],np.ndarray):
             for delay in kwargs['expected']:
@@ -30,5 +30,5 @@ def plot_corr(offsets,tau,corrs,**kwargs):
     plt.subplot(grid[0,1])
     plt.plot(amps.max(1),tau)
     plt.yticks([])
-    plt.xlabel('Max')
+    plt.xlabel('Peak SNR')
     plt.ylim(ext[2:])

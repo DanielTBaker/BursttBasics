@@ -395,14 +395,14 @@ class Station:
 
     def single_row_event(self,files,beamIDF,DM,ep0,secWin = 0.03*u.s,timeOffset = 0*u.s,find_cal=True,skipOrder=[],verbose=True):
         hasData = False
-        epPulse = (Time(ep0, scale='utc').to_value('unix')*u.s+(4148.8*(u.s*u.MHz**2) * DM * (1/self.freq**2 - 1/self.fRef**2))).to(u.s)
+        epPulse = Time(ep0, scale='utc')+(4148.8*(u.s*u.MHz**2) * DM * (1/self.freq**2 - 1/self.fRef**2)).to(u.s)
         epPulse+=timeOffset
         beamIDX,sinThetaIDY,beamIDY =  self.beamIDs_from_FUS(beamIDF)
         pixWin = int(secWin * 2 / self.timeFrame)
         pixWin = (pixWin // 4) * 4
         
         ddSpec = np.zeros((self.nChan, pixWin), dtype=np.complex64)
-        startTimes = np.zeros(self.nChan)*u.s
+        startTimes = Time(np.zeros(self.nChan),format='unix')
 
         for i in range(len(files)):
             fbin = files[i]
@@ -429,7 +429,7 @@ class Station:
                     print(f'\n--- Processing File {i}: {fbin} (order {od}) ---')
                 if od in skipOrder:
                     continue
-                epBegin = tmp[2]*u.s + 2*u.s + (tmp[0] - tmp[4]) // self.nOrder * (1./self.fpp) * self.timeFrame
+                epBegin = Time(tmp[2],format='unix')+ 2*u.s + (tmp[0] - tmp[4]) // self.nOrder * (1./self.fpp) * self.timeFrame
                 epEnd = epBegin + packMax // self.nRow *  (1./self.fpp) * self.timeFrame
                 chLow = self.nSubCh * (od-self.orderOff)
                 chHigh = self.nSubCh * (od-self.orderOff + 1) - 1
@@ -457,7 +457,7 @@ class Station:
                 p2 = p1 + nPack
 
                 if verbose:
-                    print(f'File {i}: packMax={packMax}, ep_begin={epBegin:.4f}, ep_end={epEnd:.4f}')
+                    print(f'File {i}: packMax={packMax}, ep_begin={epBegin.isot}, ep_end={epEnd.isot}')
                     print(f'File {i}: p1={p1}, p2={p2}, nPack={nPack}, nFrame={nFrame}')
         
                 ## nFrame should be multiple of 16
@@ -579,8 +579,7 @@ class Station:
         if self.nRow == 1:
             return(self.single_row_event(files,beamIDF,DM,ep0,secWin = secWin,timeOffset = timeOffset,find_cal=find_cal,skipOrder=skipOrder,verbose=verbose))
         hasData = False
-        epPulse = (Time(ep0, scale='utc').to_value('unix')*u.s+(4148.8*(u.s*u.MHz**2) * DM * (1/self.freq**2 - 1/self.fRef**2))).to(u.s)
-        epPulse+=timeOffset
+        epPulse = Time(ep0, scale='utc')+(4148.8*(u.s*u.MHz**2) * DM * (1/self.freq**2 - 1/self.fRef**2))
         if find_cal:
             self.find_best_cal(Time(ep0, scale='utc'))
         
@@ -591,7 +590,7 @@ class Station:
         pixWin = (pixWin // 4) * 4
         
         ddSpec = np.zeros((self.nChan, pixWin), dtype=np.complex64)
-        startTimes = np.zeros(self.nChan)*u.s
+        startTimes = Time(np.zeros(self.nChan),format='unix')
 
         combined_dd_inten = []
         combinedFreq = []      # To store frequencies per file
@@ -603,7 +602,6 @@ class Station:
             for i in range(len(files)):
                 # print(f'Create Proc {i}',flush=True)
                 procs.append(Reader(i))
-            print(len(procs))
             for i,p in enumerate(procs):
                 # print(f'Start Proc {i}',flush=True)
                 p.start()
@@ -612,14 +610,20 @@ class Station:
                                         self.timeFrame,self.nRow,self.nSubCh,self.orderOff,epPulse,secWin,
                                         self.nAnt,beamIDX,self.fl2int,BFMY,self.scale,pixWin,self.beamform])
             for p in procs:
+                print(f'Waiting for {p.poolID}', flush = True)
                 res = p.front_pipe.recv()
+                print(f'Recieved {p.poolID}', flush = True)
                 if res[0] == 'Success':
+                    print(f'Assigning {p.poolID}', flush = True)
                     hasData=True
                     message,ddSpec2,startTimes2,chLow = res
                     ddSpec[chLow:chLow+self.nSubCh] = ddSpec2
                     startTimes[chLow:chLow+self.nSubCh] = startTimes2
                 else:
                     print(res[0])
+                print(f'Ending Loop {p.poolID}', flush = True)
+        except Exception as e:
+            print(e)
         finally:
             for p in procs:
                 p.stop()
@@ -635,14 +639,22 @@ class Station:
                 thEW,thNS = get_source_angles(ep0Time + np.ones(1)*timeOffset,srceName=srceName,
                                             stationAngle = self.stationAngle,stationLoc = globals()[f'{self.stationID}Center'])
             hasData = False
-            epPulse = ep0Time+(4148.8*(u.s*u.MHz**2) * DM * (1/self.freq**2 - 1/self.fRef**2))
-            epPulse+=timeOffset
-            if find_cal:
-                self.find_best_cal(Time(ep0, scale='utc'))
-            
-            BFMY = self.get_BFMY(np.sin(thNS[0]),0,files=files,verbose=verbose)
+            if secWin>0:
+                epPulse = ep0Time+(4148.8*(u.s*u.MHz**2) * DM * (1/self.freq**2 - 1/self.fRef**2))
+                epPulse+=timeOffset
+            else:
+                centers,widths = self.get_center_time(files,0)
+                good = widths > 0
+                pack = (self.fpp if self.nRow > 1 else 1/self.fpp)*self.timeFrame
+                secWin = np.nanmin(widths[good])/2-3*pack
+                epPulse = np.repeat(centers,self.nChan//self.nOrder)
+            if self.nRow>1:
+                if find_cal:
+                    self.find_best_cal(Time(ep0, scale='utc'))
+                BFMY = self.get_BFMY(np.sin(thNS[0]),0,files=files,verbose=verbose)
+            else:
+                BFMY=None
             Binv = calc_Binv(freq=self.freq,spacing=self.sepX,beam0=self.xBeam0,f0=400*u.MHz,nAnt=self.nAnt,nBeam=self.nAnt,flipPos=False)
-            print(BFMY.shape)
             pixWin = int(secWin * 2 / self.timeFrame)
             pixWin = (pixWin // 4) * 4
             
@@ -658,16 +670,19 @@ class Station:
             try:
                 for i in range(len(files)):
                     # print(f'Create Proc {i}',flush=True)
-                    procs.append(Reader(i))
-                print(len(procs))
+                    procs.append(Reader(i,verbose=verbose))
                 for i,p in enumerate(procs):
                     # print(f'Start Proc {i}',flush=True)
                     p.start()
                 for i,p in enumerate(procs):
+                    if verbose:
+                        print(f'Submit for {p.poolID}')
                     p.redo_first([files[i],self.byteMeta,self.bytePack,skipOrder,self.nOrder,self.fpp,
                                             self.timeFrame,self.nRow,self.nSubCh,self.orderOff,epPulse,secWin,
                                             self.nAnt,thEW,Binv,self.fl2int,BFMY,self.scale,pixWin,self.beamform,self.freq,self.sepX])
                 for p in procs:
+                    if verbose:
+                        print(f'Waiting for {p.poolID}')
                     res = p.front_pipe.recv()
                     if res[0] == 'Success':
                         hasData=True
@@ -685,6 +700,7 @@ class Station:
     def fold_on_target(self,files,ep0,nSample=20000,period = 1*u.s,DM = 0*u.pc/u.cm**3,nBins = 256,find_cal=True,useSource=True,**kwargs):
         Binv = calc_Binv(freq=self.freq,spacing=self.sepX,beam0=self.xBeam0,f0=400*u.MHz,nAnt=self.nAnt,nBeam=self.nAnt,flipPos=False)
         ep0T = Time(ep0, scale='utc')
+        nPackets = int(nSample//self.fpp)
         if find_cal:
             self.find_best_cal(ep0T)
         profile = np.zeros((self.nChan,nBins))
@@ -722,14 +738,17 @@ class Station:
             for i in range(len(files)):
                 # print(f'Create Proc {i}',flush=True)
                 procs.append(Reader(i))
-            print(len(procs))
             for i,p in enumerate(procs):
                 # print(f'Start Proc {i}',flush=True)
                 p.start()
             for i,p in enumerate(procs):
-                p.fold_on_source([files[i],self.byteMeta,self.bytePack,[],self.nOrder,self.fpp,
-                                        self.timeFrame,self.nRow,self.nSubCh,self.orderOff,ep0T,nSample,nBins,period,
-                                        self.nAnt,thEW,Binv,self.fl2int,BFMY,self.scale,self.beamform,self.freq,self.sepX,DM,self.fRef])
+                
+                # p.fold_on_source([files[i],self.byteMeta,self.bytePack,[],self.nOrder,self.fpp,
+                #                         self.timeFrame,self.nRow,self.nSubCh,self.orderOff,ep0T,nSample,nBins,period,
+                #                         self.nAnt,thEW,Binv,self.fl2int,BFMY,self.scale,self.beamform,self.freq,self.sepX,DM,self.fRef])
+                p.fold_on_source([files[i],self.beamform,BFMY,Binv,thEW,nPackets,self.nSubCh,
+                                self.nAnt,self.sepX,self.nRow,self.byteMeta,self.bytePack,
+                                self.fl2int,self.scale,self.fpp,self.timeFrame,period,DM,nBins,self.freq,self.fRef])
             for p in procs:
                 res = p.front_pipe.recv()
                 if res[0] == 'Success':
@@ -795,14 +814,22 @@ class Station:
 
     def beamform_event_first(self,files,beamIDX,beamIDY,DM,ep0,secWin = 0.03*u.s,timeOffset = 0*u.s,skipOrder=[],verbose=False): 
         hasData = False
-        epPulse = (Time(ep0, scale='utc').to_value('unix')*u.s+(4148.8*(u.s*u.MHz**2) * DM * (1/self.freq**2 - 1/self.fRef**2))).to(u.s)
-        epPulse+=timeOffset
+        
+        if secWin>0:
+            epPulse = Time(ep0, scale='utc')+(4148.8*(u.s*u.MHz**2) * DM * (1/self.freq**2 - 1/self.fRef**2))
+            epPulse+=timeOffset
+        else:
+            centers,widths = self.get_center_time(files,0)
+            good = widths > 0
+            pack = (self.fpp if self.nRow > 1 else 1/self.fpp)*self.timeFrame
+            secWin = np.nanmin(widths[good])/2-3*pack
+            epPulse = np.repeat(centers,self.nChan//self.nOrder)
         
         pixWin = int(secWin * 2 / self.timeFrame)
         pixWin = (pixWin // 4) * 4
         
         ddSpec = np.zeros((self.nChan, pixWin), dtype=np.complex64)
-        startTimes = np.zeros(self.nChan)*u.s
+        startTimes = Time(np.zeros(self.nChan),format='unix')
 
         combined_dd_inten = []
         combinedFreq = []      # To store frequencies per file
@@ -834,7 +861,7 @@ class Station:
                     print(f'\n--- Processing File {i}: {fbin} (order {od}) ---')
             if od in skipOrder:
                 continue
-            epBegin = tmp[2]*u.s + 2*u.s + (tmp[0] - tmp[4]) // self.nOrder * self.fpp * self.timeFrame
+            epBegin = Time(tmp[2],format='unix') + 2*u.s + (tmp[0] - tmp[4]) // self.nOrder * self.fpp * self.timeFrame
             epEnd = epBegin + packMax // self.nRow * self.fpp * self.timeFrame
             chLow = self.nSubCh * (od-self.orderOff)
             chHigh = self.nSubCh * (od-self.orderOff + 1) - 1
@@ -1022,7 +1049,8 @@ class Station:
         return(ddSpec,startTimes,beamIDX,beamIDY,hasData)
 
     def get_center_time(self,files,DM,verbose=False,offset=0*u.s):
-        epCenters = np.array([np.nan for i in files],dtype=np.float64)*u.s
+        epCenters = Time(np.zeros(self.nOrder),format='unix')
+        widths = np.zeros(self.nOrder)*u.s
         for i in range(len(files)):
             fbin = files[i]
             try:
@@ -1046,24 +1074,34 @@ class Station:
                 od = tmp[4]
                 if verbose:
                     print(f'\n--- Processing File {i}: {fbin} (order {od}) ---')
-            epBegin = tmp[2]*u.s + 2*u.s + (tmp[0] - tmp[4]) // self.nOrder * self.fpp * self.timeFrame
-            epEnd = epBegin + packMax // self.nRow * self.fpp * self.timeFrame
+            if self.nRow==1:
+                    epBegin = Time(tmp[2]+ 2.,format='unix') + (tmp[0] - tmp[4]) // self.nOrder * (1./self.fpp) * self.timeFrame
+                    epEnd = epBegin + packMax // self.nRow * (1./self.fpp) * self.timeFrame
+            else:
+                epBegin = Time(tmp[2] + 2.,format='unix') + (tmp[0] - tmp[4]) // self.nOrder * self.fpp * self.timeFrame
+                epEnd = epBegin + packMax // self.nRow * self.fpp * self.timeFrame
             epCenters[(od-self.orderOff)] = (epBegin+(epEnd-epBegin)/2)-(4148.8*(u.s*u.MHz**2) * DM * (1/self.freq[self.nSubCh * (od-self.orderOff)]**2 - 1/self.fRef**2)).to(u.s)
+            
+            widths[(od-self.orderOff)] = (epEnd-epBegin).to(u.s)
             if verbose:
                 print(Time(epBegin.value,format='unix').isot)
                 print(Time(epEnd.value,format='unix').isot)
         if verbose:
             print('Order Centers:')
-            print(Time(epCenters[np.isfinite(epCenters)].value,format='unix').isot)
-        return((Time(np.nanmean(epCenters).value,format='unix')+offset).isot)
+            print(epCenters[np.isfinite(epCenters)].isot)
+        return(epCenters,widths)
         
     @property
     def pos1(self):
-        return np.arange(self.nAnt)*self.sepX
+        p1 = np.arange(self.nAnt)*self.sepX
+        p1 -= p1.mean()
+        return p1
 
     @property
     def pos2(self):
-        return np.arange(self.nRow)*self.sepY
+        p2 = np.linspace(0,self.nRow,self.nRow,endpoint=False)*self.sepY
+        p2 -= p2.mean()
+        return p2
 
     @property
     def lamb(self):
@@ -1074,11 +1112,17 @@ class Station:
         return (const.c/(400*u.MHz)).to(u.m)
         # return (const.c / self.f0).to(u.m)
 
+    # @property
+    # def freq(self):
+    #     return np.linspace(self.f0.to_value(u.MHz),
+    #                        (self.f0+self.BW).to_value(u.MHz),
+    #                        self.nChan, endpoint=False)*u.MHz
+
     @property
     def freq(self):
-        return np.linspace(self.f0.to_value(u.MHz),
-                           (self.f0+self.BW).to_value(u.MHz),
-                           self.nChan, endpoint=False)*u.MHz
+        f = np.linspace(self.f0.to_value(u.MHz),(self.f0+self.BW).to_value(u.MHz),self.nChan,endpoint=False)*u.MHz
+        # return (f[1:]+f[:-1])/2
+        return f
 
     @property
     def nSubCh(self):
@@ -1165,6 +1209,238 @@ class Reader(Process):
             sz = -1
         return(sz)
 
+    def loadBatch(self,fh, pack0, npack, bpp, ppf, beam,nAnt, hdlen=64, bitwidth=4, hdver=1, meta=0, unswap=False):
+        '''
+        load npack blocks of binary data from the open filehandle
+        starting from pack0. each block is of pack_len bytes.
+        input:
+            pack0: starting packet index (starting from 0)
+            npack: number of packets to load
+            bpp: bytes per packet (paylod only)
+        optional:
+            order_off: packet order offset (buggy, keep =0 for now)
+            hdlen: header length in bytes
+            bitwidth: data format keyword
+            hdver: header format keyword (1,2)
+            meta: ring buffer or file metadata length in bytes
+
+        output:
+            (masked array)
+            data0, shape=(npack, bpp)
+            clock, shape=(npack,)
+            order, shape=(npack,)
+        '''
+
+        pack_len = hdlen + bpp
+        b0 = pack0 * pack_len + meta
+        fh.seek(b0)
+
+        if (bitwidth==4):
+            nsamp = bpp
+            if (ppf == 2):      # 4bit, bf16, bf64 modes
+                grp = 2; nGroup = 256
+                nsamp = nGroup*grp # single beam size; nAnt=1
+        elif (bitwidth==16):
+            nsamp = bpp//4
+
+        data0 = np.ma.array(np.zeros((npack, nsamp), dtype=np.complex64), mask=False)
+        clock = np.ma.array(np.zeros(npack, dtype=np.int64), mask=False)
+        order = np.ma.array(np.zeros(npack, dtype=int), mask=False)
+        for i in range(npack):
+            buf = fh.read(pack_len)
+            tmp = packetUnpack(buf, bpp, order_off=0, hdlen=hdlen, bitwidth=bitwidth, hdver=hdver, unswap=unswap) # tmp=8192byte + a
+            if (tmp is None):
+                data0.mask[i] = True
+                clock.mask[i] = True
+                order.mask[i] = True
+            else:
+                clk, pko, spec = tmp
+                antSpec = spec.reshape((nGroup, nAnt, grp)).transpose((1, 0, 2)).reshape((nAnt, nsamp)) # single beam size; nAnt=1 | beamSpec.shape=(nAnt, nGroup*grp)
+                beamSpec = antSpec[beam] # single beam size; nAnt=1 | beamSpec.shape=(nGroup*grp,)
+                data0[i] = beamSpec # single beam size; nAnt=1 | beamSpec.shape=(nGroup*grp,)
+                clock[i] = clk
+                order[i] = pko
+
+        return data0, clock, order
+
+    def formSpec(self,data0, clock, order, ppf,nChan,nAnt, grp=2, bitmap=None, verbose=0):
+            '''
+            form spectra from the packet series
+            input:
+                data0, clock, order: as output of loadBatch
+                        data0.shap = (npack, bpp)
+                ppf: packet per frame (e.g. 2, 4 or 8)
+            optional:
+                grp: number of consecutive bytes (channels) from the same antenna input 
+                bitmap: if provided, should be a boolean array of shape (npack,)
+                        True for good packet, False for bad packet
+                        also implies the packets have been ordered, contiguous,
+                        although some packets may be invalid
+    
+                        on the other hand, if the bitmap is None,
+                        it assumes all packets are valid, but maybe not contiguous
+            
+            output:
+                data_tick, shape=(ntick,)
+                antSpec, shape=(ntick,nAnt,nChan)   where nChan=bpp*ppf/nAnt e.g. 8192*2/16=1024
+            '''
+            npack, bpp = data0.shape    # e.g. 1000, 8192
+    
+            # pre-defined format, ignore input
+            if (ppf == 2):      # 4bit, bf16, bf64 modes
+                grp = 2; nGroup = 256
+                nsamp = nGroup*grp # single beam size; nAnt=1
+            elif (ppf == 8):    # 16bit mode
+                grp = 1
+    
+            ## rearranging packets into frames, taking into account lost packets
+            #clock  = np.array(clock)   # already an array
+    
+            # raw tick
+            tick = clock - order        # packet of the same frame should have the same tick
+                                                # i.e. tick is the frame id, delta-tick = ppf
+    
+            if (bitmap is None):
+                if (verbose>1):
+                    print('in formSpec: bitmap is None. generate ad hoc one.')
+                # new tick
+                tick3 = tick - tick[0]              # tick3 starts from 0, increase by ppf (if no packet lost)
+                tick3 = tick3 // ppf                # tick3 increment normalized to 1
+                ntick = tick3.max() + 1             # e.g. ntick=500 for npack=1000
+                ntick = tick3[-1] - tick3[0] + 1
+                valid = np.ones(npack, dtype=bool)
+                tick0 = tick[0]
+            else:
+                ntick = npack // ppf
+                tmp = np.arange(npack)
+                #tmp -= tmp%ppf
+                tmp -= order
+                tick3 = (tmp//ppf).astype(int)
+                valid = bitmap
+                if (verbose>1):
+                    print('in formSpec: npack/nvalid', npack, np.count_nonzero(valid))
+                tick0 = -1
+                ii = 0
+                while (tick0 < 0 and ii<npack):
+                    if (valid[ii]):
+                        tick0 = tick[ii] - ii
+                    else:
+                        ii += 1
+                if (tick0 < 0):
+                    print('error finding valid tick')
+                    return None
+                    
+            if (verbose>0):
+                print('ntick, ppf, bpp:', ntick, ppf, bpp)
+                #print('tick3 min,max:', tick3.min(), tick3.max())
+            data  = np.ma.array(np.zeros((ntick, ppf, nsamp), dtype=np.complex64), mask=False)
+            # data  = np.ma.array(np.zeros((ntick, ppf, nsamp), dtype=np.complex64), mask=True)
+            # data  = np.ma.array(np.zeros((ntick, ppf, bpp), dtype=np.complex64), mask=True)
+            data_tick = np.arange(ntick) + tick0
+            for i in range(npack):
+                if (valid[i]):
+                    if (order.mask[i] == False):
+                        it = int(tick3[i])
+                        io = int(order[i])
+                        #print('debug:', i, it, io)
+                        if (io >= ppf):
+                            sys.exit('incorrect ppf. abort.')
+                        if (it >= 0):
+                            data[it, io] = data0[i]
+                            data[it, io].mask = False
+    
+            pack_flag = data.mask.all(axis=2)
+            empty_frame = data.mask.all(axis=(1,2))
+            fault_frame = data.mask.any(axis=(1,2))
+            empty_pack  = data.mask.all(axis=(0,2))
+    
+            if (verbose>1): # debug info
+                print('ntick:', ntick)
+                print('nempty:', np.count_nonzero(empty_frame)) # frames that are totally empty
+                print('nfault:', np.count_nonzero(fault_frame)) # frames that are partially empty
+    
+            if (ppf==2 or ppf==1):      # 4bit version
+                antSpec = data.reshape((ntick,nChan))
+                # antSpec = data.reshape((ntick,-1,nAnt,grp)).transpose((0,2,1,3)).reshape((ntick,nAnt,-1))
+            elif (ppf==8):    # 16bit version
+                evntmp = data[:,0:4].reshape((ntick,-1,nAnt)).transpose((0,2,1))
+                oddtmp = data[:,4:8].reshape((ntick,-1,nAnt)).transpose((0,2,1))
+                antSpec = np.ma.array(np.zeros((ntick,nAnt,nChan),dtype=complex), mask=True)
+                antSpec[:,:,0::2] = evntmp
+                antSpec[:,:,1::2] = oddtmp
+    
+            return data_tick, antSpec
+
+    def loadSpec(self,fh, pack0, npack, beam,byteMeta,nChan,nAnt, bpp=8192, ppf=2, grp=2, hdlen=64, bitmap=None, nBlock=0, verbose=0, bitwidth=4, hdver=1, blocklen=128000, unswap=False):
+            '''
+            a wrapper of loadBatch + formSpec
+            input:
+                fh: open binary file handle
+                pack0: starting packet index (starting from 0)
+                npack: number packets to load
+                bpp: bytes per packet (payload length, e.g. 8192)
+                ppf: packet per frame (e.g. 2)
+    
+            optional:
+                nAnt: number of antenna inputs in the packet
+                grp: number of consecutive channels (bytes) of the same antenna
+                hdlen: header length in bytes
+                order_off: (buggy) shift the packet order around, keep =0 for now
+                bitmap: boolean array, shape=(npack,); True for a good packet, False for bad
+                nBlock: int; number of Block in the open file (fh)
+                        if bitmap is None and nBlock>0, the bitmap is automatically loaded
+                verbose: int; pass to formSpec
+                bitwidth: size of the I/Q data (4 or 16)
+                        (automatically determines the grp and ppf)
+                hdver: header version (1, 2)
+                meta: ring buffer or file metadata length in bytes
+    
+            output:
+                data_tick, shape=(ntick,)
+                antSpec, shape=(ntick, nAnt, nChan)
+            '''
+            meta = byteMeta
+            #print('debug: meta', meta)
+            if (meta == 64):    # assuming a valid file header
+                # override default nBlock and blocklen
+                mdict = metaRead(fh)
+                blocklen = mdict['packet_number']
+                nBlock = mdict['block_number']
+                # also override hdver
+                hdver = 2
+                if (verbose):
+                    print('nBlock', nBlock, 'blocklen', blocklen)
+    
+            if (bitmap is None and nBlock>0):
+                BM = loadFullbitmap(fh, nBlock, blocklen=blocklen, meta=meta)
+                bitmap = BM[pack0:pack0+npack]
+    
+            if (bitmap is not None):
+                nvalid = np.count_nonzero(bitmap)
+                fvalid = float(nvalid/npack)
+                if (verbose>0):
+                    print('pack0, npack, nvalid:', pack0, npack, nvalid)
+                if (nvalid == 0):
+                    print('no valid packet!')
+                    return None
+            else:
+                if (verbose>0):
+                    print('pack0, npack:', pack0, npack, 'bitmap N/A')
+    
+            if (bitwidth==16):
+                grp = 1
+                ppf = 8
+    
+            data0, clock, order = self.loadBatch(fh, pack0, npack, bpp, ppf, beam,nAnt, hdlen=hdlen, bitwidth=bitwidth, hdver=hdver, meta=meta, unswap=unswap)
+            tmp = self.formSpec(data0, clock, order, ppf,nChan,nAnt, grp=grp, bitmap=bitmap, verbose=verbose)
+    
+            if (tmp is not None):
+                data_tick, antSpec = tmp
+            else:
+                return None
+    
+            return data_tick, antSpec
+
     def get_header(self,fbin):
         with open(fbin, 'rb') as fh:
             mt = fh.read(64)
@@ -1228,112 +1504,292 @@ class Reader(Process):
     def NS_beamform(self,nAnt,nRow,nOrder,timeFrame,nSubCh,
                     byteMeta,bytePack,fpp,orderOff,fl2int,beamform,scale,
                     fbin,skipOrder,epPulse,secWin,beamIDX,BFMY,pixWin):
-        # print(f'Start File {fbin}',flush=True)
-        sz = self.file_size_check(fbin)
-        if sz<0:
-            self.back_pipe.send(['No File'])
-            return
-        # skip zero-length target files
-        if sz == 0:
+        try:
+            # print(f'Start File {fbin}',flush=True)
+            sz = self.file_size_check(fbin)
+            if sz<0:
+                self.back_pipe.send(['No File'])
+                return(None,None,None)
+            # skip zero-length target files
+            if sz == 0:
+                if self.verbose:
+                    print(f"Skipping (size=0): {fbin}")
+                self.back_pipe.send(['File Size=0'])
+                return(None,None,None)
+            packMax = (sz - byteMeta) // bytePack
+        
+            if not os.access(fbin, os.R_OK):
+                self.back_pipe.send(['Cannot Open File'])
+                return(None,None,None)
+
+            od,tmp = self.get_header(fbin)
             if self.verbose:
-                print(f"Skipping (size=0): {fbin}")
-            self.back_pipe.send(['File Size=0'])
-            return
-        packMax = (sz - byteMeta) // bytePack
-    
-        if not os.access(fbin, os.R_OK):
-            self.back_pipe.send(['Cannot Open File'])
-            return
+                print(f'\n--- Processing File {i}: {fbin} (order {od}) ---')
+            
+            if od in skipOrder:
+                self.back_pipe.send(['Order Skipped'])
+                return(None,None,None)
+            # print('Get Times',flush=True)
+            # if self.verbose:
+                # print('Before time set',flush=True)
+            epBegin = Time(tmp[2],format='unix') + 2*u.s + (tmp[0] - tmp[4]) // nOrder * fpp * timeFrame
+            # if self.verbose:
+                # print('After time set',flush=True)
+            epEnd = epBegin + packMax // nRow * fpp * timeFrame
+            chLow = nSubCh * (od-orderOff)
+            chHigh = nSubCh * (od-orderOff + 1) - 1
+            epLow = epPulse[chLow]
+            epHigh = epPulse[chHigh]
+            
+            # p1, p2 are nearest packet to the requested frame
+            ## fix: increase margin to make sure [p1,p2] convers the window
+            # print(epHigh.isot,secWin,epBegin.isot,flush=True)
+            # if self.verbose:
+                # print('Before ps set',flush=True)
+            p1 = int(((epHigh - secWin - epBegin) / (fpp * timeFrame) - 1).to_value(u.dimensionless_unscaled)) * nRow
+            p2 = int(((epLow + secWin - epBegin) / (fpp * timeFrame) + 1).to_value(u.dimensionless_unscaled)) * nRow
+            # if self.verbose:
+                # print(f'Packets {p1} -> {p2}',flush=True)
+            # if self.verbose:
+                # print('After ps set',flush=True)
+            if p1<0 or p2>=packMax:
+                self.back_pipe.send(['Packet Out of Bounds'])
+                return(None,None,None)
+            # p1 = max(p1,0)
+            # p2 = min(p2,packMax-1)
+            if p2<p1:
+                self.back_pipe.send(['Packet Order Error'])
+                return(None,None,None)
+            #p1 = int((ep_h - secWin - ep_begin) / (frame_per_pack * timeFrame)) * nRow
+            #p2 = int((ep_l + secWin - ep_begin) / (frame_per_pack * timeFrame)) * nRow
+            nPack = p2 - p1
+            # print(nPack,flush=True)
+            nFrame = int(nPack / nRow * fpp)
+            # print(nFrame,flush=True)
+            nPack = nFrame * int(nRow / fpp)
+            # print(nPack,flush=True)
+            p2 = p1 + nPack
+            # print(p2,flush=True)
 
-        od,tmp = self.get_header(fbin)
-        if self.verbose:
-            print(f'\n--- Processing File {i}: {fbin} (order {od}) ---')
-        
-        if od in skipOrder:
-            self.back_pipe.send(['Order Skipped'])
-            return
-        epBegin = Time(tmp[2],format='unix') + 2*u.s + (tmp[0] - tmp[4]) // nOrder * fpp * timeFrame
-        epEnd = epBegin + packMax // nRow * fpp * timeFrame
-        chLow = nSubCh * (od-orderOff)
-        chHigh = nSubCh * (od-orderOff + 1) - 1
-        epLow = epPulse[chLow]
-        epHigh = epPulse[chHigh]
-        
-        # p1, p2 are nearest packet to the requested frame
-        ## fix: increase margin to make sure [p1,p2] convers the window
-        p1 = int((epHigh - secWin - epBegin) / (fpp * timeFrame) - 1) * nRow
-        p2 = int((epLow + secWin - epBegin) / (fpp * timeFrame) + 1) * nRow
-        if p1<0 or p2>=packMax:
-            self.back_pipe.send(['Packet Out of Bounds'])
-            return
-        # p1 = max(p1,0)
-        # p2 = min(p2,packMax-1)
-        if p2<p1:
-            self.back_pipe.send(['Packet Order Error'])
-            return
-        #p1 = int((ep_h - secWin - ep_begin) / (frame_per_pack * timeFrame)) * nRow
-        #p2 = int((ep_l + secWin - ep_begin) / (frame_per_pack * timeFrame)) * nRow
-        nPack = p2 - p1
-        nFrame = int(nPack / nRow * fpp)
-        nPack = nFrame * int(nRow / fpp)
-        p2 = p1 + nPack
+            if self.verbose:
+                print(f'File {i}: packMax={packMax}, ep_begin={epBegin.isot}, ep_end={epEnd.isot}')
+                print(f'File {i}: p1={p1}, p2={p2}, nPack={nPack}, nFrame={nFrame}')
 
-        if self.verbose:
-            print(f'File {i}: packMax={packMax}, ep_begin={epBegin:.4f}, ep_end={epEnd:.4f}')
-            print(f'File {i}: p1={p1}, p2={p2}, nPack={nPack}, nFrame={nFrame}')
+            ## nFrame should be multiple of 16
+            nPack = int(nFrame / 16) * 16 * 4
+            nFrame = nPack / 4
+            nSample = int(nFrame)
 
-        ## nFrame should be multiple of 16
-        nPack = int(nFrame / 16) * 16 * 4
-        nFrame = nPack / 4
-        nSample = int(nFrame)
+            # print('Read Data',flush=True)
+            fpga = np.memmap(fbin, dtype='u1', mode='r')
+            p0 = p1
+            data_off = byteMeta + bytePack * p0
+            data = fpga[data_off:]
 
+            v1 = np.zeros((nSubCh, nAnt, 2), dtype='<i2')
+            v1[:, beamIDX, 0] = fl2int
+            BFMYvec = BFMY[0, :, chLow:chLow + nSubCh].T * fl2int
+            v2 = BFMYvec.ravel().view('<f8').reshape((nSubCh, nRow, 2)).astype('<i2')
 
-        fpga = np.memmap(fbin, dtype='u1', mode='r')
-        p0 = p1
-        data_off = byteMeta + bytePack * p0
-        data = fpga[data_off:]
+            # print('Beamform',flush=True)
+            res = np.ones((nSubCh, nSample), dtype='<c8')
+            # print(f'Read File {fbin}',flush=True)
+            beamform(res, data, v1, v2, nSample, scale)
+            # print(f'Dedisperse File {fbin}',flush=True)
 
-        v1 = np.zeros((nSubCh, nAnt, 2), dtype='<i2')
-        v1[:, beamIDX, 0] = fl2int
-        BFMYvec = BFMY[0, :, chLow:chLow + nSubCh].T * fl2int
-        v2 = BFMYvec.ravel().view('<f8').reshape((nSubCh, nRow, 2)).astype('<i2')
+            ep1 = epBegin + (p1//nRow)*fpp*timeFrame
+            pixStart = ((epPulse[chLow:(chLow+nSubCh)] - secWin - ep1) / timeFrame).to_value(u.dimensionless_unscaled).astype(int)
+            
+            startTimes = ep1 + pixStart*timeFrame
 
-        res = np.ones((nSubCh, nSample), dtype='<c8')
-        # print(f'Read File {fbin}',flush=True)
-        beamform(res, data, v1, v2, nSample, scale)
-        # print(f'Dedisperse File {fbin}',flush=True)
+            if self.verbose:
+                print('first pix:', pixStart[-1])
 
-        ep1 = epBegin + (p1//nRow)*fpp*timeFrame
-        pixStart = ((epPulse[chLow:(chLow+nSubCh)] - secWin - ep1) / timeFrame).to_value(u.dimensionless_unscaled).astype(int)
-        
-        startTimes = ep1 + pixStart*timeFrame
-
-        if self.verbose:
-            print('first pix:', pixStart[-1])
-
-        ddSpec = np.zeros((nSubCh, pixWin), dtype=np.complex64)
-
-        for chi in range(nSubCh):
-            if pixStart[chi]>=0:
-                pp = pixStart[chi]
-                tmp = res[chi, pp:pp+pixWin]
-                max_len = tmp.size
-                ddSpec[chi,:max_len] = tmp[:]
-            else:
-                pp = pixStart[chi]
-                if pp+pixWin>0:
-                    tmp = res[chi, :pixWin+pp]
+            ddSpec = np.zeros((nSubCh, pixWin), dtype=np.complex64)
+            if self.verbose:
+                print(f'{self.poolID}: Start Desdispersion',flush=True)
+            # print('Dedisperse',flush=True)
+            for chi in range(nSubCh):
+                # print(chi,flush=True)
+                if pixStart[chi]>=0:
+                    pp = pixStart[chi]
+                    tmp = res[chi, pp:pp+pixWin]
                     max_len = tmp.size
-                    ddSpec[chi,-pp:-pp+max_len] = tmp[:]
-        return(ddSpec,startTimes,chLow)
+                    ddSpec[chi,:max_len] = tmp[:]
+                else:
+                    pp = pixStart[chi]
+                    if pp+pixWin>0:
+                        tmp = res[chi, :pixWin+pp]
+                        max_len = tmp.size
+                        ddSpec[chi,-pp:-pp+max_len] = tmp[:]
+            return(ddSpec,startTimes,chLow)
+        except Exception as e:
+            self.back_pipe.send([e])
+            return(None,None,None)
+
+    def single_row_data(self,nAnt,nOrder,timeFrame,nSubCh,
+                                            byteMeta,bytePack,fpp,orderOff,
+                                            fbin,skipOrder,epPulse,secWin,column,pixWin):
+        """
+        Parameters
+        ----------
+        nAnt - int
+            Number of antennas per row
+        nOrder - int
+            Number of subbands (orders)
+        timeFrame - astropy.Quantity
+            Length of time per spectral sample
+        nSubCh - int
+            Number of channels per order
+        byteMeta - int
+            Number of bytes per header
+        bytePack - int
+            Number of bytes per packet
+        fpp - int
+            Number of frames per packet ()
+        orderOff - int
+            Offset in order numbers
+        
+        Returns
+        -------
+        """
+        try:
+            # print(f'Start File {fbin}',flush=True)
+            sz = self.file_size_check(fbin)
+            if sz<0:
+                self.back_pipe.send(['No File'])
+                return(None,None,None)
+            # skip zero-length target files
+            if sz == 0:
+                if self.verbose:
+                    print(f"Skipping (size=0): {fbin}")
+                self.back_pipe.send(['File Size=0'])
+                return(None,None,None)
+            packMax = (sz - byteMeta) // bytePack
+        
+            if not os.access(fbin, os.R_OK):
+                self.back_pipe.send(['Cannot Open File'])
+                return(None,None,None)
+
+            od,tmp = self.get_header(fbin)
+            if self.verbose:
+                print(f'\n--- Processing File: {fbin} (order {od}) ---')
+            
+            if od in skipOrder:
+                self.back_pipe.send(['Order Skipped'])
+                return(None,None,None)
+
+            t0 = []
+            t1 = []
+            t2 = []
+            ## Read all headers
+            with open(fbin,'rb') as fh:
+                i=0
+                while True:
+                    fh.seek(bytePack*i+64)
+                    new = decHeader2(fh.read(64))
+                    if isinstance(new,tuple):
+                        t0.append(new[2])
+                        t1.append(new[0])
+                        t2.append(new[4])
+                        i+=1
+                    else:
+                        break
+            ## Time of all samples
+            sampleTimes = Time(t0,format='unix')+2*u.s + (np.array(t1)-np.array(t2))/1 * (1./fpp) * timeFrame
+            ## Sample ID of earliest sample
+            minSamp = np.argmin(sampleTimes)
+            if minSamp>0:
+                while sampleTimes[minSamp-1]<sampleTimes[minSamp]:
+                    minSamp-=1
+                    if minSamp == 0:
+                        break
+            ## Latest sample is 1 later
+            maxSamp = minSamp-1
+            nSamp = len(t1)
+            epBegin = sampleTimes[minSamp]
+            epEnd =  sampleTimes[maxSamp]
+
+            chLow = nSubCh * (od-orderOff)
+            chHigh = nSubCh * (od-orderOff + 1) - 1
+            epLow = epPulse[chLow]
+            epHigh = epPulse[chHigh]
+
+            # p1, p2 are nearest packet to the requested frame
+            ## fix: increase margin to make sure [p1,p2] convers the window
+            # print(epHigh.isot,secWin,epBegin.isot,flush=True)
+            # if self.verbose:
+                # print('Before ps set',flush=True)
+            p1 = int(((epHigh - secWin - epBegin) / ((1./fpp) * timeFrame) - 1).to_value(u.dimensionless_unscaled)) * 1
+            p2 = int(((epLow + secWin - epBegin) / ((1./fpp) * timeFrame) + 1).to_value(u.dimensionless_unscaled)) * 1
+            nPack = p2 - p1
+            # print(nPack,flush=True)
+            nFrame = int(nPack / 1 * (1./fpp))
+            # print(nFrame,flush=True)
+            nPack = nFrame * int(1 / (1./fpp))
+            # print(nPack,flush=True)
+            p2 = p1 + nPack
+            deltap = p2-p1
+            chunks = [(np.mod(p1,nSamp),np.mod(p1,nSamp)+deltap)]
+            if chunks[0][1]<chunks[0][0]:
+                chunks.append((0,chunks[0][1]))
+                chunks[0][1]=nSamp
+            if self.verbose:
+                print(f'File {i}: packMax={nSamp}, ep_begin={epBegin.isot}, ep_end={epEnd.isot}')
+                print(f'File {i} chunk 0: p1={chunks[0][0]}, p2={chunks[0][1]}, nPack={chunks[0][1]-chunks[0][0]}, nFrame={int((chunks[0][1]-chunks[0][0])/fpp)}')
+            res = np.zeros((nFrame,nSubCh), dtype=np.complex64)
+
+            bitmap = np.ones(chunks[0][1]-chunks[0][0], dtype=bool)
+            with open(fbin, 'rb') as fh:
+                tick,res[:int((chunks[0][1]-chunks[0][0])/fpp),:] = self.loadSpec(fh, chunks[0][0], chunks[0][1]-chunks[0][0],
+                                                                                  column,byteMeta,nSubCh,nAnt, bitmap=bitmap,
+                                                                                  bitwidth = 4, hdver=2)
+            if len(chunks)>1:
+                if self.verbose:
+                    print(f'File {i} chunk 0: p1={chunks[1][0]}, p2={chunks[1][1]}, nPack={chunks[1][1]-chunks[1][0]}, nFrame={int((chunks[1][1]-chunks[1][0])/fpp)}')
+                bitmap = np.ones(chunks[1][1]-chunks[1][0], dtype=bool)
+                with open(fbin, 'rb') as fh:
+                    tick,res[int((chunks[0][1]-chunks[0][0])/fpp):,:] = self.loadSpec(fh, chunks[1][0], chunks[1][1]-chunks[1][0],
+                                                                                        column,byteMeta,nSubCh,nAnt, bitmap=bitmap,
+                                                                                        bitwidth = 4, hdver=2)
+            
+            ep1 = sampleTimes[chunks[0][0]]
+            pixStart = ((epPulse[chLow:(chLow+nSubCh)] - secWin - ep1) / timeFrame).to_value(u.dimensionless_unscaled).astype(int)
+            
+            startTimes = ep1 + pixStart*timeFrame
+
+            if self.verbose:
+                print('first pix:', pixStart[-1])
+
+            ddSpec = np.zeros((nSubCh, pixWin), dtype=np.complex64)
+            if self.verbose:
+                print(f'{self.poolID}: Start Desdispersion',flush=True)
+            # print('Dedisperse',flush=True)
+            for chi in range(nSubCh):
+                # print(chi,flush=True)
+                if pixStart[chi]>=0:
+                    pp = pixStart[chi]
+                    tmp = res[pp:pp+pixWin,chi]
+                    max_len = tmp.size
+                    ddSpec[chi,:max_len] = tmp[:]
+                else:
+                    pp = pixStart[chi]
+                    if pp+pixWin>0:
+                        tmp = res[:pixWin+pp,chi]
+                        max_len = tmp.size
+                        ddSpec[chi,-pp:-pp+max_len] = tmp[:]
+            return(ddSpec,startTimes,chLow)
+        except Exception as e:
+            self.back_pipe.send([e])
+            return(None,None,None)
 
     def single_event__(self,x):
         fbin,byteMeta,bytePack,skipOrder,nOrder,fpp,timeFrame,nRow,nSubCh,orderOff,epPulse,secWin,nAnt,beamIDX,fl2int,BFMY,scale,pixWin,beamform = x
         ddSpec,startTimes,chLow = self.NS_beamform(nAnt,nRow,nOrder,timeFrame,nSubCh,
                     byteMeta,bytePack,fpp,orderOff,fl2int,beamform,scale,
                     fbin,skipOrder,epPulse,secWin,beamIDX,BFMY,pixWin)
+        print(f'Send Back {self.poolID}', flush = True)
         self.back_pipe.send(['Success',ddSpec,startTimes,chLow])
-        return
 
     def invert_first(self,specs,Binv):
         specs2 = np.einsum('jik,ikl -> jkl',Binv,np.nan_to_num(specs))
@@ -1354,19 +1810,56 @@ class Reader(Process):
             final = np.einsum('ijk,ijl->ljk',np.nan_to_num(final),BFMY)
         return(final)
 
+    def first_beamform_by_packet(self,fbin,beamform,BFMY,beamIDX,p0,nPackets,nSubCh,chLow,nAnt,nRow,byteMeta,bytePack,fl2int,scale,fpp):
+        fpga = np.memmap(fbin, dtype='u1', mode='r')
+        data_off = byteMeta + bytePack * nRow * p0
+        data = fpga[data_off:]
+
+        v1 = np.zeros((nSubCh, nAnt, 2), dtype='<i2')
+        v1[:, beamIDX, 0] = fl2int
+        BFMYvec = BFMY[0, :, chLow:chLow + nSubCh].T * fl2int
+        v2 = BFMYvec.ravel().view('<f8').reshape((nSubCh, nRow, 2)).astype('<i2')
+        nSample = nPackets*fpp
+        res = np.ones((nSubCh, nSample), dtype='<c8')
+        # print(f'Read File {fbin}',flush=True)
+        beamform(res, data, v1, v2, nSample, scale)
+        return(res)
+
     def redo_first__(self,x):
         fbin,byteMeta,bytePack,skipOrder,nOrder,fpp,timeFrame,nRow,nSubCh,orderOff,epPulse,secWin,nAnt,thetaX,Binv,fl2int,BFMY,scale,pixWin,beamform,freq,spacing = x
         rowSpec = np.zeros((nAnt,nSubCh, pixWin), dtype=np.complex64)
         for column in range(nAnt):
-            rowSpec[column],startTimes,chLow = self.NS_beamform(nAnt,nRow,nOrder,timeFrame,nSubCh,
-                        byteMeta,bytePack,fpp,orderOff,fl2int,beamform,scale,
-                        fbin,skipOrder,epPulse,secWin,column,BFMY,pixWin)
+            if self.verbose:
+                print(f'{self.poolID}: Start column {column+1}/{nAnt}',flush=True)
+            if nRow > 1:
+                columnSpec,startTimes,chLow = self.NS_beamform(nAnt,nRow,nOrder,timeFrame,nSubCh,
+                            byteMeta,bytePack,fpp,orderOff,fl2int,beamform,scale,
+                            fbin,skipOrder,epPulse,secWin,column,BFMY,pixWin)
+            else:
+                self.verbose=True
+                columnSpec,startTimes,chLow = self.single_row_data(nAnt,nOrder,timeFrame,nSubCh,
+                                            byteMeta,bytePack,fpp,orderOff,
+                                            fbin,skipOrder,epPulse,secWin,column,pixWin)
+            if isinstance(columnSpec,np.ndarray):
+                rowSpec[column] = columnSpec
+                columnSpec = None
+            else:
+                return
+        if self.verbose:
+            print(f'{self.poolID}: Invert First',flush=True)
         rowSpec = self.invert_first(rowSpec,Binv[:,:,chLow:chLow+nSubCh])
-        ddSpec = self.beamform_line(rowSpec,None,thetaX,freq[chLow:chLow+nSubCh],skipCal=True,spacing=spacing)
+        if self.verbose:
+            print(f'{self.poolID}: Redo First',flush=True)
+        if nRow>1:
+            ddSpec = self.beamform_line(rowSpec,None,thetaX,freq[chLow:chLow+nSubCh],skipCal=True,spacing=spacing)
+        else: 
+            print(rowSpec.shape)
+            ddSpec = rowSpec[0]
         self.back_pipe.send(['Success',ddSpec,startTimes,chLow])
 
     def fold_on_source__(self,x):
-        fbin,byteMeta,bytePack,skipOrder,nOrder,fpp,timeFrame,nRow,nSubCh,orderOff,epPulse,nFrame,nBins,period,nAnt,thetaX,Binv,fl2int,BFMY,scale,beamform,freq,spacing,DM,fref = x
+        fbin,beamform,BFMY,Binv,thetaX,nPackets,nSubCh,nAnt,spacingX,nRow,byteMeta,bytePack,fl2int,scale,fpp,timeFrame,period,DM,nBins,freq,fref = x
+        nPackets = int((16*round((fpp*nPackets)/16))/fpp)
         sz = self.file_size_check(fbin)
         if sz<0:
             self.back_pipe.send(['No File'])
@@ -1377,37 +1870,35 @@ class Reader(Process):
                 print(f"Skipping (size=0): {fbin}")
             self.back_pipe.send(['File Size=0'])
             return
-        packMax = (sz - byteMeta) // bytePack
-        frameMax =  int(packMax*fpp/nRow)
-        nChunks = frameMax//nFrame
+        packMax = (sz - byteMeta) // (bytePack*nRow)
+        nFrame = nPackets*fpp
+        nChunks = packMax//nPackets
+
+        order,__ = self.get_header(fbin)
+        chLow = order*nSubCh
+
         foldedSpec = np.zeros((nSubCh,nBins))
         counts = np.zeros((nSubCh,nBins),dtype=int)
         DMt = (DM/K)*(1/freq**2 - 1/fref**2)
         internalPhases = (((np.linspace(0,nFrame,nFrame,endpoint=False)*timeFrame)[np.newaxis,:]-DMt[:,np.newaxis])/period).to_value(u.dimensionless_unscaled)
-        # eID = fbin.split('/')[-1].split('.')[1]
-        # order = fbin.split('/')[-1].split('.')[3]
-        # tempSpec = foldedSpec*0
-        # tempCounts = counts*0
+
+        rowSpec = np.zeros((nAnt,nSubCh, nFrame), dtype=np.complex64)
         for chunk in range(nChunks):
-            rowSpec = np.zeros((nAnt,nSubCh, nFrame), dtype=np.complex64)
-            frame0 = nFrame*chunk
-            worked = True
-            for column in range(nAnt):
-                rowSpec[column],startTime,chLow,column_worked = self.NS_beam_from_px(nAnt,nRow,nOrder,timeFrame,nSubCh,
-                                                                       byteMeta,bytePack,fpp,orderOff,fl2int,beamform,scale,
-                                                                       fbin,skipOrder,column,BFMY,frame0,nFrame)
-                worked*=column_worked
-                if not worked:
-                    break
-            if not worked:
+            print(f'Start chunk {chunk} for order {order}',flush=True)
+            p0 = chunk*nPackets
+            nPacketsChunk = nPackets+0
+            if p0+nPacketsChunk>packMax:
+                nPacketsChunk = packMax-p0
+                nPacketsChunk = int((16*np.floor((fpp*nPacketsChunk)/16))/fpp)
+            if nPacketsChunk == 0:
                 break
-            if chunk==0:
-                refTime = startTime+0*u.s
+            for column in range(nAnt):
+                rowSpec[column] = self.first_beamform_by_packet(fbin,beamform,BFMY,column,p0,nPackets,nSubCh,chLow,nAnt,nRow,byteMeta,bytePack,fl2int,scale,fpp)
             # print(chLow,chunk,(startTime-refTime).to(timeFrame.unit)//timeFrame,flush=True)
             rowSpec = self.invert_first(rowSpec,Binv[:,:,chLow:chLow+nSubCh])
-            I = self.beamform_line(rowSpec,None,thetaX,freq[chLow:chLow+nSubCh],skipCal=True,spacing=spacing)[0].value
+            I = self.beamform_line(rowSpec,None,thetaX,freq[chLow:chLow+nSubCh],skipCal=True,spacing=spacingX)[0].value
             I = np.abs(I)**2
-            phases = np.mod(((startTime-epPulse)/period).to_value(u.dimensionless_unscaled)+internalPhases[chLow:chLow+nSubCh]+.5,1)-.5
+            phases = np.mod(((p0*fpp*timeFrame)/period).to_value(u.dimensionless_unscaled)+internalPhases[chLow:chLow+nSubCh]+.5,1)-.5
             if np.all((I[:,0]==0)+(~np.isfinite(I[:,0]))) or np.all((I[:,-1]==0)+(~np.isfinite(I[:,-1]))):
                 m = np.all((I==0)+(~np.isfinite(I)),axis=0)
                 keep = np.argwhere(~m)[:,0]
@@ -1487,7 +1978,6 @@ def get_source_angles(t,srceName='PSR B0531+21',stationAngle = 3*u.deg,stationLo
     alaz = AltAz(location=stationLoc,obstime=t)
     ## Convert source into frame
     if 'ra' in kwargs and 'dec' in kwargs:
-        print('given')
         srce = SkyCoord(ra=kwargs['ra']<<u.deg,dec=kwargs['dec']<<u.deg,obstime=t).transform_to(alaz)
     else:
         srce = SkyCoord.from_name(srceName).transform_to(alaz)

@@ -287,9 +287,9 @@ def transfer_data(transfer : dict, station,**kwargs) -> None:
             bwLimit = f'{station.bwLimit}M'
             targetIP = station.targetIP
             if 'dest' in kwargs:
-                targetDir = kwargs['dest']
+                targetDir = os.path.join(kwargs['dest'],source.lower())
             else:
-                targetDir = f'/burstt_home/shared/dbaker/{source.lower()}'
+                targetDir = f'/burstt_home/shared/dbaker/{source.lower()}/'
             destination = f'{station.username}@{targetIP}:{targetDir}'
             command = ["rsync", "-avh", '--info=progress2', '--remove-source-files'] + transfer[source] + [destination, f'--bwlimit={bwLimit}']
             print(f'Start transfer of {len(transfer[source])} {source} files')

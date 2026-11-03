@@ -9,8 +9,22 @@ import subprocess
 import datetime
 import shlex
 import re
+import os
 
 def time_to_at(t):
+    """
+    Convert an astropy.Time object into the string time date format used by at on linux
+    Parameters
+    ----------
+    t : astropy.Time
+        Desired time
+    Returns
+    -------
+    timeStr : string
+        The year-month-day hr:min formated time string for at
+    seconds : float
+        The residual time between the timeStr and the input time
+    """
     dt = t.datetime
     seconds = dt.second+dt.microsecond/1e6
     dt+=datetime.timedelta(seconds=-seconds)
@@ -18,6 +32,12 @@ def time_to_at(t):
     return(timeStr,seconds)
 
 def str_to_time(t):
+    """
+    Parameters
+    ----------
+    Returns
+    -------
+    """
     return Time(f"{t[:4]}-{t[4:6]}-{t[6:8]}T{t[9:11]}:{t[11:13]}:{t[13:]}")
 
 def alaz_to_thetas(alt,az,stationAngle = 3*u.deg):
@@ -61,6 +81,21 @@ def time_to_string(time):
     return string
 
 def get_disks(machine,username='ubuntu'):
+    """
+    Returns the free space available on a given BURSTT machine
+    Parameters
+    ----------
+    machine: string
+        The name of BURSTT machine to check (e.g. burstt11)
+    username: string (optional)
+        The username to use when connecting to the machine. Defaults to ubuntu
+    Returns
+    -------
+    diskNums: np.ndarray
+        List of disk numbers
+    space: np.ndArray
+        The space available within each disk (in Tibytes)
+    """
     result = subprocess.run([f'ssh {username}@{machine}  \'df -lh | grep "dev/s" | grep "disk"\''],
                                 text=True,
                                 capture_output=True,
@@ -82,6 +117,12 @@ class ScheduleItem:
         pass
 
     def from_dict(self,dict: dict):
+        """
+        Parameters
+        ----------
+        dict: dictionary
+            Dictionary with schedule Item parameters
+        """
         if 'note' in dict:
             self.note = dict['note']
         else:
@@ -90,19 +131,45 @@ class ScheduleItem:
         self.status = dict['status']
 
     def check_close(self,time: Time, tol=0*u.hour):
+        """
+        Test if a given time is close to this event
+        Parameters
+        ----------
+        time : astropy.Time
+
+        Returns
+        -------
+            False
+        """
         return(False)
 
-    def to_dict(self):
-        dict = {'note':self.note,
+    def to_dict(self) -> dict:
+        """
+        Put standard parameters in a dictionary for saving
+        Returns
+        -------
+        pars : dictionary
+            A dictionary of the relevant parameters
+        """
+        pars = {'note':self.note,
                 'stations':self.stations,
                 'status':self.status
                }
-        return(dict)
+        return(pars)
+    
     def __repr__(self):
         return f'ScheduleItem({self.status})'
 
     def plot_kwargs(self) -> dict:
-        return({'alpha':.9})
+        """
+        Determine the kwargs needed to add the event to the scheduling plot
+        Returns
+        -------
+        pars: dict
+            A dictionary of plotting options
+        """
+        pars = {'alpha':.9}
+        return(pars)
 
     @property
     def id(self):
@@ -149,7 +216,7 @@ class ScheduleInstant(ScheduleItem):
     def plot_kwargs(self) -> dict:
         plotOptions = super().plot_kwargs()
         plotOptions.update({'linewidth':5})
-        if self.status == 'submitted':
+        if self.status in ['submitted','bemformed']:
             plotOptions.update({'ls':'-'})
         elif self.status == 'pending':
             plotOptions.update({'ls':'--'})
@@ -165,7 +232,7 @@ class ScheduleInstant(ScheduleItem):
         
     @property
     def id(self):
-        return(self.time.isot.replace('-','').replace('T','_').replace(':','').split('.')[0])
+        return((self.time-8*u.hour).isot.replace('-','').replace('T','_').replace(':','').split('.')[0])
     @property
     def info(self):
         label = 'Scheduled Event\n'
@@ -223,7 +290,7 @@ class ScheduleExtended(ScheduleItem):
     
     @property
     def id(self):
-        return(self.start.isot.replace('-','').replace('T','_').replace(':','').split('.')[0])
+        return((self.start-8*u.hour).isot.replace('-','').replace('T','_').replace(':','').split('.')[0])
     @property
     def info(self):
         label = 'Scheduled Event\n'
@@ -242,6 +309,7 @@ class ScheduleBeam(ScheduleExtended):
         self.drives = {}
         self.files = {}
         self.beamParameters = {}
+        self.servers = {}
         super().__init__(**kwargs)
 
     def from_dict(self,dict: dict):
@@ -250,6 +318,8 @@ class ScheduleBeam(ScheduleExtended):
         self.drives = dict['drives']
         self.files = dict['files']
         self.beamParameters = dict['beamParameters']
+        if 'servers' in dict:
+            self.servers = dict['servers']
 
     def to_dict(self):
         dict = super().to_dict()
@@ -257,6 +327,7 @@ class ScheduleBeam(ScheduleExtended):
         dict.update({'drives' : self.drives})
         dict.update({'files' : self.files})
         dict.update({'beamParameters' : self.beamParameters})
+        dict.update({'servers': self.servers})
         return(dict)
 
     def __repr__(self):
@@ -264,7 +335,7 @@ class ScheduleBeam(ScheduleExtended):
 
     def plot_kwargs(self) -> dict:
             plotOptions = super().plot_kwargs()
-            if self.status == 'submitted':
+            if self.status in ['submitted','transferred']:
                 plotOptions.update({'facecolor':'tab:blue'})
             else:
                 plotOptions.update({'edgecolor':'tab:blue'})
@@ -354,6 +425,7 @@ class ScheduleTrigger(ScheduleInstant):
     def __init__(self,target: str ='', DM = 0,**kwargs):
         self.target = target
         self.DM = DM
+        self.calibrators = []
         super().__init__(**kwargs)
 
     def from_dict(self,dict: dict) -> None:
@@ -361,10 +433,13 @@ class ScheduleTrigger(ScheduleInstant):
         self.target = dict['target']
         if 'DM' in dict:
             self.DM = dict['DM']
+        if 'calibrators' in dict:
+            self.calibrators = dict['calibrators']
     def to_dict(self):
         dict = super().to_dict()
         dict.update({'target' : self.target})
         dict.update({'DM' : self.DM})
+        dict.update({'calibrators' : self.calibrators})
         return(dict)
     
     def __repr__(self):
@@ -379,15 +454,16 @@ class ScheduleTrigger(ScheduleInstant):
     def info(self):
         label = 'Trigger\n'
         label += f'Run at: {self.time.isot}\n'
-        label += f'Target: {self.target}'
+        label += f'Target: {self.target}\n'
         label += f'Status: {self.status}\n'
         label += f'Stations: {self.stations}\n'
         label += f'DM: {self.DM}\n'
+        label += f'Calibrators: {self.calibrators}\n'
         label += f'{self.note}\n'
         return(label)
 
 class Station:
-    def __init__(self,name: str, servers: list[str] = [], username: str = 'ubuntu', nFile: int = 2,**kwargs) -> None:
+    def __init__(self,name: str, servers: list[str] = [], username: str = 'ubuntu', nFile: int = 2,beamformDir: str ='dbaker/daily/',**kwargs) -> None:
         self.name = name
         config = GetStationConfig(self.name)
         self.longName = config['Name']
@@ -400,6 +476,11 @@ class Station:
         self.fLow = config['FreqLim_MHz'][0]*u.MHz
         self.fHigh = config['FreqLim_MHz'][1]*u.MHz
         self.beamPars = {'beam0': 0}
+        if 'mainServer' in kwargs:
+            self.mainServer=kwargs['mainServer']
+        else:
+            self.mainServer = servers[0]
+        
         if 'delays' in kwargs:
             self.delays = kwargs['delays']
         else:
@@ -409,8 +490,12 @@ class Station:
         else:
             self.beamPars.update({'beam1':0})
         self.servers = servers
+        # if (not isinstance(self.mainServer,str)) and len(servers)>0:
+        #     self.mainServer = self.servers[-1]
         self.username = username
         self.nFile = nFile
+        self.beamformBase = beamformDir
+
 
     def get_beam_time(self,time: Time, updates: list[SchedulePoint]) -> dict:
         newBeamPars = {key : {'value' : 0, 'lastUpdate' : Time(0,format='unix')} for key in self.beamPars}
@@ -497,9 +582,13 @@ class Station:
                 print(f"Rsync failed with exit code {e.returncode}", file=sys.stderr)
                 print(f"Error output:\n{e.stderr}", file=sys.stderr)
 
-    def run_remote_command(self,command: str,shell=False) -> dict:
+    def run_remote_command(self,command: str,shell=False,awaitOutputs=True,useMain = False) -> dict:
         outputs = {}
-        for server in self.servers:
+        if useMain:
+            iterator = [self.servers[-1]]
+        processes = []
+        iterator = self.servers
+        for server in iterator:
             if 'rsync' in command:
                 process = subprocess.Popen(f'ssh -tt {self.username}@{server} {shlex.quote("bash -ic "+shlex.quote(command))}',
                            shell=True,
@@ -507,6 +596,9 @@ class Station:
                         stderr=subprocess.STDOUT, # Merge stderr to catch errors here too
                         text=True,
                         bufsize=1)
+                if not awaitOutputs:
+                    processes.append(process)
+                    continue
                 percent_pattern = re.compile(r'(\d+)%')
                 while True:
                         # rsync progress updates often end with '\r' (carriage return), not '\n'
@@ -524,6 +616,7 @@ class Station:
                                 # Clean up the output string to show a custom text progress
                                 sys.stdout.write(f"\rProgress: [{percent}%] Parsing data...")
                                 sys.stdout.flush()
+                process.stdout.close()
                 process.wait()
                 if process.returncode == 0:
                     outputs.update({server: 'rsync complete'})
@@ -533,7 +626,10 @@ class Station:
                 result = subprocess.run(f'ssh -tt {self.username}@{server} {shlex.quote("bash -ic "+shlex.quote(command))}',text=True,capture_output=True,shell=shell)
                 print(result.stderr)
                 outputs.update({server: result.stdout})
-        return(outputs)
+        if awaitOutputs:
+            return(outputs)
+        else:
+            return(processes)
 
     def submit_event(self,event: ScheduleItem,display=False):
         if self.name in event.stations and event.status == 'pending':
@@ -579,6 +675,8 @@ class Station:
                     print(self.name)
                     print(result)
 
+    # def recover_event(self,event: ScheduleItem, display = False):
+    #     if
 
     def source_angles_at_time(self,time,**kwargs):
         if 'source' in kwargs:
@@ -591,3 +689,10 @@ class Station:
         sourceALAZ = source.transform_to(alaz)
         thEW,thNS = alaz_to_thetas(sourceALAZ.alt,sourceALAZ.az,self.rotate)
         return(sourceALAZ.alt,sourceALAZ.az,thEW,thNS)
+
+
+    @property
+    def beamformDir(self):
+        if self.beamformBase.startswith('/'):
+            return(self.beamformBase)
+        return(os.path.join(f'/home/{self.username}',self.beamformBase))

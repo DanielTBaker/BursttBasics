@@ -5,26 +5,27 @@ import numpy as np
 from scipy.optimize import curve_fit
 from .plotting import *
 import zipfile
+from dataclasses import dataclass, field, fields, asdict
+from typing import Any, Optional
+import json
 
-def get_peak_time(s0,baseOff=0,maxOff=100,width=2048,weight=True,idPeak=None):
+def get_peak_time(s0,width=2048,weight=True,idPeak=None):
     sampleTime = s0.time[1]-s0.time[0]
-    if weight:
-        modelT = s0.profModel(s0.time.to_value(u.ms),*s0.poptT)-s0.poptT[-1]
-        idPeak = np.argmax(modelT)
-    elif idPeak == None:
-        id0=maxOff+1
-        if baseOff<0:
-            id0-=baseOff
-        idPeak = id0+width//2
+    if idPeak==None:
+        if weight:
+            modelT = s0.profModel(s0.time.to_value(u.ms),*s0.poptT)-s0.poptT[-1]
+            idPeak = np.argmax(modelT)
+        else:
+            idPeak = s0.spec.shape[1]//2
     else:
-        id0=idPeak-width//2
+        idPeak=idPeak
     if s0.ep0Time:
         tRef = s0.ep0[0]+idPeak*sampleTime
-    if isinstance(s0.ep0,np.ndarray):
+    elif isinstance(s0.ep0,np.ndarray):
         tRef = Time(s0.ep0[0],format='unix')+idPeak*sampleTime
     else:
         tRef = Time(s0.ep0,format='unix')+idPeak*sampleTime
-    return(tRef)
+    return(tRef,idPeak)
 
 def correlate_dump(s0,s1,
                    baseOff=0*u.us,maxOff=100,
@@ -62,39 +63,33 @@ def correlate_dump(s0,s1,
     use1 = (f1>=f0.min())*(f1<=f0.max())
     ## If using a model weight determine the weights
     ## also determine bounds of region to correlate
+    tRef,idPeak = get_peak_time(s0,width,weight,idPeak)
+    id0=idPeak-width//2
     if weight:
         modelT = s0.profModel(s0.time.to_value(u.ms),*s0.poptT)-s0.poptT[-1]
         modelF = s0.freq_function(f0.value,*s0.poptF)-s0.poptF[-1]
-        idPeak = np.argmax(modelT)
-        id0 = idPeak-width//2
         model = modelF[use0][:,np.newaxis]*modelT[id0:id0+width]
-    elif idPeak == None:
-        id0=maxOff+1
-        if baseOffIDX<0:
-            id0-=baseOffIDX
-        idPeak = id0+width//2
-    else:
-        id0=idPeak-width//2
+    
 
     ## Crop and conjugate spectrum from 1st station
     spec0 = np.conjugate(s0.spec[use0,id0:id0+width])
     ## Determine time from reference for each sample and correct rate
     if not rate==0:
         if s0.ep0Time:
-            t = s0.time[id0:id0+width][np.newaxis,:]+(s0.ep0[use0]-s0.ep0[0])[:,np.newaxis] -idPeak*sampleTime
+            t =  (s0.time[id0:id0+width].to_value(u.s) -idPeak*sampleTime.to_value(u.s))[np.newaxis,:] + (s0.ep0[use0]-s0.ep0[0]).to_value(u.s)[:,np.newaxis]
         else:
-            t = s0.time[id0:id0+width][np.newaxis,:]+(s0.ep0[use0]-s0.ep0[0])[:,np.newaxis]*u.s -idPeak*sampleTime
-        f = s0.freq[use0]*1
-        spec0 *= np.exp(-1j*2*np.pi*(f[:,np.newaxis]*(rate*t)).to_value(u.dimensionless_unscaled))
+            t =  (s0.time[id0:id0+width].to_value(u.s) -idPeak*sampleTime.to_value(u.s))[np.newaxis,:] + (s0.ep0[use0]-s0.ep0[0])[:,np.newaxis]
+        
+        f = s0.freq[use0].to_value(u.Hz)
+        spec0 *= np.exp(-1j*2*np.pi*(f[:,np.newaxis]*(rate*t)))
         t=None
     ## Apply correction for ionospheric DM difference
     if not dDM ==0:
         dP = ((dDM/K)/s0.freq[use0]).to_value(u.dimensionless_unscaled)
         spec0 *= np.exp(-1j*2*np.pi*dP)[:,np.newaxis]
     if not tauShift == 0*u.ns:
-        spec0*=np.exp(-1j*2*np.pi*(tauShift*s0.freq[use0]).to_value(u.dimensionless_unscaled))[:,np.newaxis]
+        spec0*=np.exp(-1j*2*np.pi*(tauShift.to_value(u.s)*s0.freq[use0].to_value(u.Hz)))[:,np.newaxis]
     
-
     ## Check difference in start times
     startDiff = get_start_off(s0,s1)
     startOff = (np.round(startDiff/sampleTime)).astype(int)
@@ -106,8 +101,6 @@ def correlate_dump(s0,s1,
     iterator = enumerate(offsets)
     if progress:
         iterator=tqdm(iterator,total=2*maxOff+1,leave=leave)
-    
-    
     try:
         for ido,o in iterator:
             ## Shift second station against first and multiple
@@ -130,22 +123,17 @@ def correlate_dump(s0,s1,
                 corrs[:,ido] = np.fft.fftshift(fCross[:,0])/np.median(fAmp)
     except Exception as e:
         print('----')
-        print(f'Total Size: {s1.spec.shape[1]}')
+        print(f'Total Size: {s0.spec.shape[1]},{s1.spec.shape[1]}')
         print(f'Start Offset: {startOff}')
         print(f'Cut Start: {id0}')
         print(f'Max Off: {maxOff}')
         print(f'Base Off: {baseOffIDX}')
+        print(f'FirstPx: {id0+offsets.min()+startOff+id0}')
+        print(f'LastPx: {id0+offsets.max()+startOff+id0+width}')
         print('----')
         raise e
 
     tau = fft_axis(f0[use0],u.ns)
-    if s0.ep0Time:
-        tRef = s0.ep0[0]+idPeak*sampleTime
-    else:
-        if isinstance(s0.ep0,np.ndarray):
-            tRef = Time(s0.ep0[0],format='unix')+idPeak*sampleTime
-        else:
-            tRef = Time(s0.ep0,format='unix')+idPeak*sampleTime
     return(offsets,tau,corrs,startResidual,tRef)
 
 def rate_dm_peaks(station0,station1,baseDelay,baseRate,
@@ -449,3 +437,97 @@ def get_clock_correction(times,station0='FUS',station1='LTN'):
             except:
                 continue
         return(clockCorr)
+
+def _enc(v):
+    if isinstance(v,EarthLocation):
+        return {'__location__': 1, 'x_m' : v.x.to_value(u.m), 'y_m' : v.y.to_value(u.m), 'z_m' : v.z.to_value(u.m)}
+    if isinstance(v, Time):
+        return {'__time__': 1, 'jd1': np.asarray(v.jd1).tolist(), 'jd2': np.asarray(v.jd2).tolist(), 'scale': v.scale}
+    if isinstance(v, SkyCoord):
+        c = v.icrs
+        return {'__skycoord__': 1, 'ra_deg': np.asarray(c.ra.deg).tolist(), 'dec_deg': np.asarray(c.dec.deg).tolist()}
+    if isinstance(v, u.Quantity):
+        return {'__quantity__': 1, 'value': np.asarray(v.value).tolist(), 'unit': v.unit.to_string()}
+    if isinstance(v, np.ndarray):  return v.tolist()
+    if isinstance(v, np.generic):  return v.item()
+    if isinstance(v, dict):        return {k: _enc(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)): return [_enc(x) for x in v]
+    return v
+
+def _dec(v):
+    if isinstance(v, dict):
+        if v.get('__time__'):      return Time(v['jd1'], v['jd2'], format='jd', scale=v['scale'])
+        if v.get('__skycoord__'):  return SkyCoord(ra=np.array(v['ra_deg'])*u.deg, dec=np.array(v['dec_deg'])*u.deg, frame='icrs')
+        if v.get('__quantity__'):  return np.array(v['value'])*u.Unit(v['unit'])
+        if v.get('__location__'):  return EarthLocation(x=v['x_m']*u.m,y=v['y_m']*u.m,z=v['z_m']*u.m)
+        return {k: _dec(x) for k, x in v.items()}
+    if isinstance(v, list):        return [_dec(x) for x in v]
+    return v
+
+@dataclass
+class CorrelationResult:
+
+    ## Event Info
+    eventID: str = ''
+    stations: tuple = ()
+    
+    ## Source info
+    sourceName: str = ''
+    sourceCoords: Optional[SkyCoord] = None
+    type: Optional[str] = None
+
+    ## Reference
+    tRef: Optional[Time] = None
+    modelDelay: Optional[u.Quantity] = None
+    modelRate: Optional[u.Quantity] = None
+    clockCorr: Optional[dict] = None
+    refDM: Optional[u.Quantity] = None
+    stationCoords: Optional[dict] = None
+    
+
+    ## Results
+    coarseDelay: Optional[u.Quantity] = None
+    tauInf: Optional[u.Quantity] = None
+    tauInfErr: Optional[u.Quantity] = None
+    nuRef: Optional[u.Quantity] = None
+    tauRef: Optional[u.Quantity] = None
+    tauRefErr: Optional[u.Quantity] = None
+    dDM: Optional[u.Quantity] = None
+    dDMErr: Optional[u.Quantity] = None
+    phi0: Optional[float] = None
+    phi0Err: Optional[float] = None
+    tInfdDMCov: Optional[u.Quantity] = None
+
+    ## Diagnostics
+    SNR: Optional[float] = None
+
+    ## Other
+    extra: dict = field(default_factory=dict)
+    
+    @property
+    def totalDelay(self):
+        return (self.coarseDelay + self.tauInf).to(u.ns)
+
+    @property
+    def defaultFile(self):
+        return(f'{self.eventID}_{self.sourceName}_{self.stations[0]}-{self.stations[1]}.json')
+
+    def save_json(self,**kwargs):
+        if "filename" in kwargs:
+            filename = kwargs['filename']
+        else:
+            filename = self.defaultFile
+        with open(filename, 'w', encoding='utf-8') as fh:
+            json.dump(_enc(asdict(self)), fh, indent=2)
+
+    @classmethod
+    def from_json(cls, filename):
+        with open(filename, encoding='utf-8') as fh:
+            d = _dec(json.load(fh))
+        names = {f.name for f in fields(cls)}
+        extra = {k: d.pop(k) for k in list(d) if k not in names}   # tolerate older or newer files
+        if 'stations' in d and isinstance(d['stations'], list):
+            d['stations'] = tuple(d['stations'])
+        obj = cls(**d)
+        obj.extra.update(extra)
+        return obj

@@ -34,22 +34,13 @@ def braced_glob(path):
 def file_order(files,blockFrame=51200,headSize = 64,nBlock=1600):
     dirs = []
     fs = []
-    rings = []
+    orders = []
     beams = []
     stamps = []
-    machines = []
     
     for file in files:
         dr =''
         sp = file.split('/')
-        for i in range(len(sp)-1):
-            sp[i]+='/'
-            if sp[i][:6]=='burstt':
-                try:
-                    machines.append(int(sp[i][6:-1]))
-                    continue
-                except:
-                    pass
         dr = dr.join(sp[:-1])
         dirs.append(dr)
         parts = sp[-1].split('_')
@@ -61,50 +52,44 @@ def file_order(files,blockFrame=51200,headSize = 64,nBlock=1600):
         tmp = decHeader2(hd,verbose=False)
         fh.close()
         stamp = (tmp[0]//2)/(blockFrame*nBlock)
+        orders.append(tmp[-1])
         for i,p in enumerate(parts):
-            if p[:4]=='ring':
-                ring=p[4:]
-                continue
-            elif p[:4]=='beam':
+            if p[:4]=='beam':
                 beam = p[4:]
                 continue
             elif p[0]=='f':
                 f=p[1:]
                 continue
-        rings.append(ring)
         beams.append(beam)
         fs.append(f)
         stamps.append(stamp)
-    machines = np.array(machines)
+    orders = np.array(orders)
     dirs = np.array(dirs)
-    rings = np.array(rings)
     fs = np.array(fs)
     beams = np.array(beams)
     stamps = np.array(stamps)
     stamps-=stamps.min()
     stamps=np.round(stamps)
     
-    mU = np.sort(np.unique(machines))
+    oU = np.sort(np.unique(orders))
     dU = np.sort(np.unique(dirs))
-    rU = np.sort(np.unique(rings))
     fU = np.sort(np.unique(fs))
     # bU = np.sort(np.unique(beams))
     sU = np.sort(np.unique(stamps))
     fbystamp = []
     stampbystamp = []
-    for m in mU:
-        for r in rU:
-            for s in sU:
-                tmp = []
-                tmp2 = []
-                for f in fU:
-                    for i in range(len(files)):
-                        if machines[i]==m and rings[i]==r and stamps[i]==s and fs[i]==f:
-                            tmp.append(files[i])
-                            tmp2.append(s)
-                            continue
-                fbystamp.append(tmp)
-                stampbystamp.append(tmp2)
+    for o in oU:
+        for s in sU:
+            tmp = []
+            tmp2 = []
+            for f in fU:
+                for i in range(len(files)):
+                    if orders[i]==o and stamps[i]==s and fs[i]==f:
+                        tmp.append(files[i])
+                        tmp2.append(s)
+                        continue
+            fbystamp.append(tmp)
+            stampbystamp.append(tmp2)
     return(fbystamp,stampbystamp)
 
 class Stream:
@@ -727,7 +712,7 @@ class Baseband(Stream):
                         tmp = decHeader2(hd,verbose=False)
                         try:
                             self.blockEpoch0 = tmp[2]+2
-                            self.blockStart[e,b,fID]=(tmp[0]//2)
+                            self.blockStart[e,b,fID]=(tmp[0]-tmp[4])//2
                         except:
                             continue
                     fh.close()

@@ -524,10 +524,10 @@ class SingleChunkProcess(Process):
                 print(f'{self.poolID}: load {obs.name}\n',flush=True)
                 self.specs.append(dc.StationDump(obs.name))
                 baseDelay,baseRate = calc.dump_delay([self.specs[0],self.specs[-1]],source)
-                targetStart = self.specs[0].ep0[0]+baseDelay-(nSearch+5)*obs.frameSec
+                targetStart = self.specs[0].ep0[0]+baseDelay-(nSearch+10)*obs.frameSec
                 targetStartPx = int(obs.packet_from_time(targetStart-obs.frameSec))
                 
-                spec,ep0s = obs.read_block(targetStartPx,chunkWidth+2*nSearch+10)
+                spec,ep0s = obs.read_block(targetStartPx,chunkWidth+2*nSearch+20)
                 spec+=.5+.5j
                 # self.specs.append(np.ma.array(spec,mask=False))
                 
@@ -546,6 +546,11 @@ class SingleChunkProcess(Process):
                 # print(f'{self.poolID}: {self.specs[0].spec.shape[1]} {self.specs[1].spec.shape[1]} {chunkWidth}\n',flush=True)
                 # print(f'{self.poolID}: {(self.specs[1].ep0[0]-self.specs[0].ep0[0]).to(u.us)} {baseDelay.to(u.us):.2f}\n',flush=True)
                 print(f'{self.poolID}: {obs.name} dtype is {self.specs[-1].spec.dtype}\n',flush=True)
+                currentStart = self.specs[-1].ep0[0]
+                earliestNeeded = self.specs[0].ep0 +baseDelay-(nSearch+2)*2.56*u.us
+                currentEnd = currentStart + self.specs[-1].time.max()
+                latestNeeded = self.specs[0].ep0 + self.specs[0].time.max()+baseDelay+(nSearch+2)*2.56*u.us
+                print(f'{self.poolID}: {obs.name} {(currentStart<earliestNeeded).all()},{(currentEnd>latestNeeded).all()}')
             self.back_pipe.send(['data loaded'])
 
     def correlate__(self,x):
@@ -573,59 +578,38 @@ class SingleChunkProcess(Process):
             spec.norm_spec()
             spec.clip_spec()
         for dID in range(len(self.specs)-specID0-1):
-            specID1 = specID0+dID+1
-            
-            baseDelay,baseRate = calc.dump_delay([self.specs[specID0],self.specs[specID1]],source)
-            if doFull:
-                output = bcorr.find_rate_dm(self.specs[specID0],self.specs[specID1],baseDelay,
-                                        baseRate,weight=False,line=False,**settings)
-                dDM,dDMF,dDMError,rate,rateF,rateError,tau,tauF,tauErr,peakSNR,offset,startResidual,tauOff,tauOffF = output
-                results.update({f'{self.specs[specID0].station}-{self.specs[specID1].station}':{
-                                            'time' : [bcorr.get_peak_time(self.specs[specID0],weight=False)[0]],
-                                            'offsets' : [offset],
-                                            'offsetResidual' : [startResidual],
-                                            'tau' : [tau],
-                                            'tauFit' : [tauF],
-                                            'tauErr' : [tauErr],
-                                            'tauSub' : [tauOff],
-                                            'tauSubFit' : [tauOffF],
-                                            'rate' : [rate],
-                                            'rateFit' : [rateF],
-                                            'rateErr' : [rateError],
-                                            'dDM' : [dDM],
-                                            'dDMFit' : [dDMF],
-                                            'dDMErr' : [dDMError],
-                                            'SNR' : [peakSNR],
-                                            'mask' : [True],
-                                            'refDM' : [self.specs[specID0].DM],
-                                            'refFreq' : [dc.get_f_overlap(self.specs[specID0],self.specs[specID1])[0]]
-                                        }})
-                if save:
-                    for i in range(len(self.specs)):
-                        stationName = self.observations[i].name
-                        np.savez(os.path.join(self.observations[i].cutDir,f'{stationName}_{eventID}_{self.poolID}.npz'),
-                                 spec = self.specs[i].spec,
-                                 time = self.specs[i].time,
-                                 freq = self.specs[i].freq,
-                                 ep0 = self.specs[i].ep0,
-                                 delay = baseDelay,
-                                 rate = baseRate,
-                                 )
-                    offsets,taus,corrs,startResidual,tRef = bcorr.correlate_dump(self.specs[specID0],self.specs[specID1],maxOff=nSearch,
-                                                                    progress=False,
-                                                                    baseOff=baseDelay,weight=False,mean=True,
-                                                                    width=self.specs[0].spec.shape[1],
-                                                                    idPeak=self.specs[0].spec.shape[1]//2,rate=baseRate)
-                    np.savez(os.path.join(self.observations[specID0].correlationDir,f'{self.observations[specID0].station}-{self.observations[specID1].station}_{eventID}_{self.poolID}.npz'),
-                            offsets = offsets,
-                            taus=taus,
-                            corrs=corrs
-                                            )
-            else:
-                if save:
-                    for i in range(len(self.specs)):
-                        stationName = self.observations[i].name
-                        np.savez(os.path.join(self.observations[i].cutDir,f'{stationName}_{eventID}_{self.poolID}.npz'),
+            try:
+                specID1 = specID0+dID+1
+                
+                baseDelay,baseRate = calc.dump_delay([self.specs[specID0],self.specs[specID1]],source)
+                if doFull:
+                    output = bcorr.find_rate_dm(self.specs[specID0],self.specs[specID1],baseDelay,
+                                            baseRate,weight=False,line=False,**settings)
+                    dDM,dDMF,dDMError,rate,rateF,rateError,tau,tauF,tauErr,peakSNR,offset,startResidual,tauOff,tauOffF = output
+                    results.update({f'{self.specs[specID0].station}-{self.specs[specID1].station}':{
+                                                'time' : [bcorr.get_peak_time(self.specs[specID0],weight=False)[0]],
+                                                'offsets' : [offset],
+                                                'offsetResidual' : [startResidual],
+                                                'tau' : [tau],
+                                                'tauFit' : [tauF],
+                                                'tauErr' : [tauErr],
+                                                'tauSub' : [tauOff],
+                                                'tauSubFit' : [tauOffF],
+                                                'rate' : [rate],
+                                                'rateFit' : [rateF],
+                                                'rateErr' : [rateError],
+                                                'dDM' : [dDM],
+                                                'dDMFit' : [dDMF],
+                                                'dDMErr' : [dDMError],
+                                                'SNR' : [peakSNR],
+                                                'mask' : [True],
+                                                'refDM' : [self.specs[specID0].DM],
+                                                'refFreq' : [dc.get_f_overlap(self.specs[specID0],self.specs[specID1])[0]]
+                                            }})
+                    if save:
+                        for i in range(len(self.specs)):
+                            stationName = self.observations[i].name
+                            np.savez(os.path.join(self.observations[i].cutDir,f'{stationName}_{eventID}_{self.poolID}.npz'),
                                     spec = self.specs[i].spec,
                                     time = self.specs[i].time,
                                     freq = self.specs[i].freq,
@@ -633,27 +617,54 @@ class SingleChunkProcess(Process):
                                     delay = baseDelay,
                                     rate = baseRate,
                                     )
-                    print(f'{self.poolID}: Make corr\n',flush=True)
-                    offsets,taus,corrs,startResidual,tRef = bcorr.correlate_dump(self.specs[specID0],self.specs[specID1],maxOff=nSearch,
-                                                                    progress=False,
-                                                                    baseOff=baseDelay,weight=False,mean=True,
-                                                                    width=self.specs[0].spec.shape[1],
-                                                                    idPeak=self.specs[0].spec.shape[1]//2,rate=baseRate)
-                    np.savez(os.path.join(self.observations[specID0].correlationDir,f'{self.observations[specID0].station}-{self.observations[specID1].station}_{eventID}_{self.poolID}.npz'),
-                            offsets = offsets,
-                            taus=taus,
-                            corrs=corrs
-                            )
-                    if plot:
-                        plot_corr(offsets,taus,corrs)
-            
-            if plot:
-                with PdfPages(os.path.join(self.observations[0].plotDir,
-                                                    f'{self.specs[specID0].station}-{self.specs[specID1].station}_{eventID}_{self.poolID}.pdf'
-                                                    )) as pdf:
-                    for num in plt.get_fignums():
-                        pdf.savefig(plt.figure(num))
-                    plt.close('all')
+                        offsets,taus,corrs,startResidual,tRef = bcorr.correlate_dump(self.specs[specID0],self.specs[specID1],maxOff=nSearch,
+                                                                        progress=False,
+                                                                        baseOff=baseDelay,weight=False,mean=True,
+                                                                        width=self.specs[0].spec.shape[1],
+                                                                        idPeak=self.specs[0].spec.shape[1]//2,rate=rate,dDM=dDM)
+                        np.savez(os.path.join(self.observations[specID0].correlationDir,f'{self.observations[specID0].station}-{self.observations[specID1].station}_{eventID}_{self.poolID}.npz'),
+                                offsets = offsets,
+                                taus=taus,
+                                corrs=corrs,
+                                rate = baseRate,
+                                baseDelay = baseDelay,
+                                dDM = dDM
+                                )
+                else:
+                    if save:
+                        for i in range(len(self.specs)):
+                            stationName = self.observations[i].name
+                            np.savez(os.path.join(self.observations[i].cutDir,f'{stationName}_{eventID}_{self.poolID}.npz'),
+                                        spec = self.specs[i].spec,
+                                        time = self.specs[i].time,
+                                        freq = self.specs[i].freq,
+                                        ep0 = self.specs[i].ep0,
+                                        delay = baseDelay,
+                                        rate = baseRate,
+                                        )
+                        print(f'{self.poolID}: Make corr\n',flush=True)
+                        offsets,taus,corrs,startResidual,tRef = bcorr.correlate_dump(self.specs[specID0],self.specs[specID1],maxOff=nSearch,
+                                                                        progress=False,
+                                                                        baseOff=baseDelay,weight=False,mean=True,
+                                                                        width=self.specs[0].spec.shape[1],
+                                                                        idPeak=self.specs[0].spec.shape[1]//2,rate=baseRate)
+                        np.savez(os.path.join(self.observations[specID0].correlationDir,f'{self.observations[specID0].station}-{self.observations[specID1].station}_{eventID}_{self.poolID}.npz'),
+                                offsets = offsets,
+                                taus=taus,
+                                corrs=corrs
+                                )
+                        if plot:
+                            plot_corr(offsets,taus,corrs)
+                
+                if plot:
+                    with PdfPages(os.path.join(self.observations[0].plotDir,
+                                                        f'{self.specs[specID0].station}-{self.specs[specID1].station}_{eventID}_{self.poolID}.pdf'
+                                                        )) as pdf:
+                        for num in plt.get_fignums():
+                            pdf.savefig(plt.figure(num))
+                        plt.close('all')
+            except Exception as e:
+                print(f'{self.poolID} : Error on {specID1}')
         print(f'{self.poolID} sending back\n',flush=True)
         self.back_pipe.send(['data correlated',results])
 
