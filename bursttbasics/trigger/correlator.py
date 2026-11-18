@@ -8,6 +8,13 @@ import zipfile
 from dataclasses import dataclass, field, fields, asdict
 from typing import Any, Optional
 import json
+import corner
+try:
+    from tqdm import tqdm
+    hastqdm = True
+except:
+    hastqdm = False
+from matplotlib.backends.backend_pdf import PdfPages
 
 def get_peak_time(s0,width=2048,weight=True,idPeak=None):
     sampleTime = s0.time[1]-s0.time[0]
@@ -31,7 +38,7 @@ def correlate_dump(s0,s1,
                    baseOff=0*u.us,maxOff=100,
                    width=2048,weight=True,idPeak=None,
                    rate=0*u.s*u.Hz,dDM = 0*u.pc/u.cm**3,
-                   progress=False,leave=True,mean=False,tauShift = 0*u.ns,meanSub=False
+                   progress=False,leave=True,mean=False,tauShift = 0*u.ns,meanSub=False,norm=True,
                   ):
     """ 
     Correlate the data in two station dumps
@@ -81,7 +88,7 @@ def correlate_dump(s0,s1,
             t =  (s0.time[id0:id0+width].to_value(u.s) -idPeak*sampleTime.to_value(u.s))[np.newaxis,:] + (s0.ep0[use0]-s0.ep0[0])[:,np.newaxis]
         
         f = s0.freq[use0].to_value(u.Hz)
-        spec0 *= np.exp(-1j*2*np.pi*(f[:,np.newaxis]*(rate*t)))
+        spec0 *= np.exp(-1j*2*np.pi*(f[:,np.newaxis]*(rate.to_value(u.dimensionless_unscaled)*t)))
         t=None
     ## Apply correction for ionospheric DM difference
     if not dDM ==0:
@@ -99,14 +106,15 @@ def correlate_dump(s0,s1,
     corrs = np.zeros((spec0.shape[0],offsets.shape[0]),dtype=np.complex64)
     cross = np.zeros(spec0.shape,dtype=spec0.dtype)
     iterator = enumerate(offsets)
-    if progress:
+    if progress and hastqdm:
         iterator=tqdm(iterator,total=2*maxOff+1,leave=leave)
     try:
         for ido,o in iterator:
             ## Shift second station against first and multiple
             cross[:,:] = spec0*s1.spec[use1,id0+o+startOff:id0+o+startOff+width]
             ## Normalize and apply weights
-            cross/=np.abs(cross)
+            if norm:
+                cross/=np.abs(cross)
             if weight:
                 # cross/=np.abs(cross)
                 cross*=model
@@ -199,7 +207,7 @@ def rate_dm_peaks(station0,station1,baseDelay,baseRate,
     tauOff = np.zeros(peaks.shape)*u.ns
     # taus = np.zeros((dDMs.shape[0],rates.shape[0]))*u.ns
     iterator = enumerate(rates)
-    if progress:
+    if progress and hastqdm:
         iterator = tqdm(iterator,total=rates.shape[0])
     for i,rate in iterator:
         offsets,tau,corrs,startResidual,tRef = correlate_dump(station0,station1,
@@ -386,8 +394,7 @@ def time_to_year_day(time):
         day = np.array([t.datetime.timetuple().tm_yday for t in time])
     return(year,day)
 
-def get_ppp_date(year,day,station):
-    pppBaseDir = '/burstt_home/shared/gnss/ppp'
+def get_ppp_date(year,day,station,pppBaseDir = '/burstt_home/shared/gnss/ppp',**kwargs):
     zipFile = f'{station}-{year}-{str(day).zfill(3)}-full_output.zip'
     zipPath = os.path.join(pppBaseDir,zipFile)
     if not os.path.isfile(zipPath):
@@ -406,24 +413,24 @@ def get_ppp_date(year,day,station):
     pppTime = Time(np.array([f'{int(x)}-01-01T00:00:00' for x in year]))+(day-1)*u.day+hour*u.hour
     return(pppTime[clock!=0],clock[clock!=0])
     
-def get_clock_correction(times,station0='FUS',station1='LTN'):
+def get_clock_correction(times,station0='FUS',station1='LTN',**kwargs):
         years,days = time_to_year_day(times+(18*u.s))
         clockCorr = np.zeros(times.shape[0])*np.nan*u.us
-        pppTime0,clock0 =  get_ppp_date(years[0],days[0]-1,station0)
-        pppTime1,clock1 =  get_ppp_date(years[0],days[0]-1,station1)
+        pppTime0,clock0 =  get_ppp_date(years[0],days[0]-1,station0,**kwargs)
+        pppTime1,clock1 =  get_ppp_date(years[0],days[0]-1,station1,**kwargs)
         i=1
         while times.min()<pppTime0.min() or times.min()<pppTime1.min():
             years,days = time_to_year_day(times+(18*u.s)-i*u.day)
-            pppTime0,clock0 =  get_ppp_date(years[0],days[0],station0)
-            pppTime1,clock1 =  get_ppp_date(years[0],days[0],station1)
+            pppTime0,clock0 =  get_ppp_date(years[0],days[0],station0,**kwargs)
+            pppTime1,clock1 =  get_ppp_date(years[0],days[0],station1,**kwargs)
             i+=1
         interp0 = interp1d(pppTime0.mjd,clock0.to_value(u.us))
         interp1 = interp1d(pppTime1.mjd,clock1.to_value(u.us))
         for i,t in enumerate(times):
             if t+(18*u.s)<max(pppTime0[0],pppTime1[0]) or t+(18*u.s)>min(pppTime0[-1],pppTime1[-1]):
                 try:
-                    pppTimeA,clockA =  get_ppp_date(years[i],days[i],station0)
-                    pppTimeB,clockB =  get_ppp_date(years[i],days[i],station1)
+                    pppTimeA,clockA =  get_ppp_date(years[i],days[i],station0,**kwargs)
+                    pppTimeB,clockB =  get_ppp_date(years[i],days[i],station1,**kwargs)
                     pppTime0 = pppTimeA
                     clock0 = clockA
                     pppTime1 = pppTimeB
@@ -466,7 +473,7 @@ def _dec(v):
 
 @dataclass
 class CorrelationResult:
-
+    
     ## Event Info
     eventID: str = ''
     stations: tuple = ()
@@ -531,3 +538,108 @@ class CorrelationResult:
         obj = cls(**d)
         obj.extra.update(extra)
         return obj
+
+    def update_clock(self):
+        try:
+            self.clockCorr = get_clock_correction(Time([self.tRef]),*self.stations)[0]
+        except:
+            pass
+
+def sigma_est(s0,s1,maxOff=100,
+                   baseOff=0*u.us,
+                   width=2048,weight=True,idPeak=None,
+                   rate=0*u.s*u.Hz,dDM = 0*u.pc/u.cm**3,
+                   progress=False,leave=True,mean=False,tauShift = 0*u.ns,meanSub=False
+                  ):
+    """ 
+    Correlate the data in two station dumps
+
+    Parameters
+    ----------
+    s0 : bursttcorr.dumpclass.StationDump
+        Dumped data from station 0
+    s1 : bursttcorr.dumpclass.StationDump
+        Dumped data from station 1
+    maxOff : int
+        Number of coarse shifts to search on either side of baseOff
+    width : int
+        Number of sample to correlate
+    weight : bool
+        Weight correlation using model from s0
+    idPeak : bool
+        sample ID to center at
+    
+    
+
+    """
+    sampleTime = s0.time[1]-s0.time[0]
+    baseOffIDX = int(np.round(baseOff/sampleTime))
+    ## Determine freq overlap
+    f0 = s0.freq
+    f1 = s1.freq
+    use0 = (f0>=f1.min())*(f0<=f1.max())
+    use1 = (f1>=f0.min())*(f1<=f0.max())
+    ## If using a model weight determine the weights
+    ## also determine bounds of region to correlate
+    tRef,idPeak = get_peak_time(s0,width,weight,idPeak=idPeak)
+    id0=idPeak-width//2
+    if weight:
+        modelT = s0.profModel(s0.time.to_value(u.ms),*s0.poptT)-s0.poptT[-1]
+        modelF = s0.freq_function(f0.value,*s0.poptF)-s0.poptF[-1]
+        model = modelF[use0][:,np.newaxis]*modelT[id0:id0+width]
+
+    ## Crop and conjugate spectrum from 1st station
+    spec0 = np.conjugate(s0.spec[use0,id0:id0+width])
+    ## Determine time from reference for each sample and correct rate
+    if not rate==0:
+        if s0.ep0Time:
+            t =  (s0.time[id0:id0+width].to_value(u.s) -idPeak*sampleTime.to_value(u.s))[np.newaxis,:] + (s0.ep0[use0]-s0.ep0[0]).to_value(u.s)[:,np.newaxis]
+        else:
+            t =  (s0.time[id0:id0+width].to_value(u.s) -idPeak*sampleTime.to_value(u.s))[np.newaxis,:] + (s0.ep0[use0]-s0.ep0[0])[:,np.newaxis]
+        
+        f = s0.freq[use0].to_value(u.Hz)
+        spec0 *= np.exp(-1j*2*np.pi*(f[:,np.newaxis]*(rate.to_value(u.dimensionless_unscaled)*t)))
+        t=None
+    ## Apply correction for ionospheric DM difference
+    if not dDM ==0:
+        dP = ((dDM/K)/s0.freq[use0]).to_value(u.dimensionless_unscaled)
+        spec0 *= np.exp(-1j*2*np.pi*dP)[:,np.newaxis]
+    if not tauShift == 0*u.ns:
+        spec0*=np.exp(-1j*2*np.pi*(tauShift*s0.freq[use0]).to_value(u.dimensionless_unscaled))[:,np.newaxis]
+    
+
+    ## Check difference in start times
+    startDiff = get_start_off(s0,s1)
+    startOff = (np.round(startDiff/sampleTime)).astype(int)
+   
+    startResidual = startDiff - startOff*sampleTime
+    cross = np.zeros(spec0.shape,dtype=spec0.dtype)
+    cross[:,:] = spec0*s1.spec[use1,id0+baseOffIDX+startOff:id0+baseOffIDX+startOff+width]
+    ## Normalize and apply weights
+    cross/=np.abs(cross)
+    if weight:
+        # cross/=np.abs(cross)
+        cross*=model
+    ## FFT allong frequency for fine delay
+    if meanSub:
+        cross-=np.nanmean(cross)
+    if mean:
+        fCross = np.fft.fftshift(np.fft.fft(np.nan_to_num(np.nanmean(cross,1))))
+        fAmp = np.abs(fCross)
+        norm = np.nanmedian(fAmp)
+        V=np.fft.ifft(fCross)/norm
+    else:
+        fCross = np.fft.fft2(np.nan_to_num(cross))
+        fAmp = np.abs(fCross)
+        ## Record correlation vs fine delay for given coarse shift
+        norm = np.median(fAmp)
+        V = np.fft.ifft(fCross[:,0])/norm
+    dphi = np.angle(cross*np.conj(V)[:, np.newaxis])
+    if weight:
+        sigmaPerp = np.sqrt(np.nansum((model/norm)**2 * np.sin(dphi)**2, axis=1))
+    else:
+        sigmaPerp = np.sqrt(np.nansum((1/norm)**2 * np.sin(dphi)**2, axis=1))
+    if mean:
+        sigmaPerp/=cross.shape[1]
+    sigmaPerp[sigmaPerp==0]=np.nan
+    return(sigmaPerp)

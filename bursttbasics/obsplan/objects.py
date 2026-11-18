@@ -584,10 +584,10 @@ class Station:
 
     def run_remote_command(self,command: str,shell=False,awaitOutputs=True,useMain = False) -> dict:
         outputs = {}
+        iterator = self.servers
         if useMain:
             iterator = [self.servers[-1]]
         processes = []
-        iterator = self.servers
         for server in iterator:
             if 'rsync' in command:
                 process = subprocess.Popen(f'ssh -tt {self.username}@{server} {shlex.quote("bash -ic "+shlex.quote(command))}',
@@ -640,7 +640,8 @@ class Station:
                 cmd =f'source /data/kylin/bin/mod_activate.sh;conda activate bursttda;'
                 cmd += 'python /home/ubuntu/shwang/script/scheduleObs.py beam'
                 cmd += f' --stn {self.name}'
-                cmd += f' -c /home/ubuntu/shwang/plan/{event.files[self.name]}'
+                replacedName = event.files[self.name].replace(" ","\ ")
+                cmd += f' -c /home/ubuntu/shwang/plan/{replacedName}'
                 cmd += f' --start {time_to_string(event.start)} --end {time_to_string(event.end)}'
                 cmd += ' --disk_ids'
                 for disk in event.drives[self.name]:

@@ -712,7 +712,7 @@ class Baseband(Stream):
                         tmp = decHeader2(hd,verbose=False)
                         try:
                             self.blockEpoch0 = tmp[2]+2
-                            self.blockStart[e,b,fID]=(tmp[0]-tmp[4])//2
+                            self.blockStart[e,b,fID]=((tmp[0]-tmp[4])//self.nOrder*self.nOrder)//2
                         except:
                             continue
                     fh.close()

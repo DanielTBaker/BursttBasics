@@ -10,6 +10,9 @@ import contextlib
 from astropy.stats import sigma_clip
 import subprocess
 from astropy.time import Time
+from datetime import datetime, timedelta
+import threading
+import queue
 
 def find_files(eventID : str,searchDirs : list) -> list:
     """Find all ring files for a given trigger
@@ -66,7 +69,10 @@ def find_files(eventID : str,searchDirs : list) -> list:
             if matchedFiles:
                 break
         if not matchedFiles:
-            eventT = datetime.strptime(f"{eventID.split('.')[0]}Z", "%Y%m%d_%H%M%SZ")
+            if '.' in eventID:
+                eventT = datetime.strptime(f"{eventID.split('.')[0]}Z", "%Y%m%d_%H%M%SZ")
+            else:
+                eventT = datetime.strptime(eventID, "%Y%m%d_%H%M%SZ")
             for shiftSec in range(1, 6):
                 shiftedDt = eventT + timedelta(seconds=shiftSec)
                 shiftedStr = shiftedDt.strftime("%Y%m%d_%H%M%SZ")
@@ -270,7 +276,21 @@ def plot_spectrum(spec : np.ndarray,f : u.Quantity,t : u.quantity,
         plt.show()
     return(SNR.max())
 
-def transfer_data(transfer : dict, station,**kwargs) -> None:
+def _reader(pipe, q):
+    for chunk in iter(lambda: pipe.read(256), ''):
+        q.put(chunk)
+    q.put(None)
+
+def _start_rsync(files, destination, free, bwLimit):
+    cmd = ["rsync", "-avh", "--partial", "--info=progress2", "--remove-source-files"] + files + [destination]
+    if not free:
+        cmd.append(f"--bwlimit={bwLimit}")
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    pQueue = queue.Queue()
+    threading.Thread(target=_reader, args=(process.stdout, pQueue), daemon=True).start()
+    return(process, pQueue)
+
+def transfer_data(transfer : dict, station,checkTime = timedelta(seconds=30),**kwargs) -> None:
     """Transfer data listed in transfer dictionary using the parameters given by station
     Parameters
     ----------
@@ -291,24 +311,45 @@ def transfer_data(transfer : dict, station,**kwargs) -> None:
             else:
                 targetDir = f'/burstt_home/shared/dbaker/{source.lower()}/'
             destination = f'{station.username}@{targetIP}:{targetDir}'
-            command = ["rsync", "-avh", '--info=progress2', '--remove-source-files'] + transfer[source] + [destination, f'--bwlimit={bwLimit}']
+            command = ["rsync", "-avh", '--info=progress2', '--remove-source-files'] + transfer[source] + [destination]
+            lastCheck = datetime.now()
+            free = station.check_free(lastCheck)
             print(f'Start transfer of {len(transfer[source])} {source} files')
-            process = subprocess.Popen(command,
-                                        stdout=subprocess.PIPE,
-                                        stderr=subprocess.PIPE,
-                                        text=True,bufsize=1)
-            try:
+            process, pQueue = _start_rsync(transfer[source],destination,free,bwLimit)
+            # try:
                 # iter(lambda: ...) reads the output character by character or line by line
-                for line in iter(process.stdout.readline, ""):
-                    # Display the raw progress line from rsync
-                    if '%' in line:
-                        sys.stdout.write(f"\r{line.strip()}"+"\x1b[K")
-                        sys.stdout.flush()
-            finally:
-                process.stdout.close()
-                return_code = process.wait()
-                if return_code == 0:
-                    print("\nTransfer Complete.")
-                else:
-                    print(f"\nError: Rsync exited with code {return_code}")
+            while True:
+                try:
+                    chunk = pQueue.get(timeout=1)
+                except queue.Empty:
+                    chunk = ''
+                if chunk is None:                       # rsync finished and its output is closed
+                    break
+                if chunk:
+                    for part in chunk.replace('\r', '\n').split('\n'):
+                        if '%' in part:
+                            sys.stdout.write('\r' + part.strip() + '\x1b[K'); sys.stdout.flush()
+                newCheck = datetime.now()
+                if newCheck-lastCheck > checkTime:
+                    lastCheck = newCheck
+                    nowFree = station.check_free(lastCheck)
+                    if not free == nowFree:
+                        free = nowFree
+                        process.terminate()
+                        try:
+                            process.wait(timeout=30)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait()
+                        files = [f for f in transfer[source] if os.path.exists(f)]
+                        if not files:
+                            break
+                        process, pQueue = _start_rsync(files,destination,free,bwLimit)
+            # finally:
+            #     process.stdout.close()
+            return_code = process.wait()
+            if return_code == 0:
+                print("\nTransfer Complete.")
+            else:
+                print(f"\nError: Rsync exited with code {return_code}")
 

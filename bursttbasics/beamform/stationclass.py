@@ -49,9 +49,10 @@ class Station:
                  stationAngle = -3*u.deg,
                  byteMeta = 64,bytePack = 8256,
                  orderOff = 0,
-                 fpp = 4,fl2int = 256,beamform = None,calib = 'calibration',skipRows = [],
+                 fpp = 4,fl2int = 256,beamform = None,calib = 'calibration',skipRows = None,
                  targetIP = '140.109.178.116',
-                 stationID = 'STN',bwLimit=30,saveDir='./',calFormat='.txt',username = 'ubuntu'
+                 stationID = 'STN',bwLimit=30,saveDir='./',calFormat='.txt',username = 'ubuntu',
+                 freeStart = None,freeStop = None, skipCals = None
                 ):
         
         self.orderOff = orderOff
@@ -86,17 +87,31 @@ class Station:
 
         self.username = username
 
+        if skipCals == None:
+            self.skipCals = []
+        else:
+            self.skipCals = skipCals
         if self.nRow>1:
             self.set_cal_options(calib)
+
+        if freeStart == None:
+            self.freeStart = []
+        else:
+            self.freeStart = freeStart
+        if freeStop == None:
+            self.freeStop = []
+        else:
+            self.freeStop = freeStop
+        if len(self.freeStop)<len(self.freeStart):
+            self.freeStop += [24 for i in range(len(self.freeStart)-len(self.freeStop))]
+        if len(self.freeStop)>len(self.freeStart):
+            self.freeStart += [0 for i in range(len(self.freeStop)-len(self.freeStart))]
         
-    def set_cal_options(self,calDir,verbose=False):
+    def set_cal_options(self,calDir: str,verbose=False):
         if os.path.isdir(calDir):
-            self.calibrationDir = calDir
-            if self.calibrationDir[-1]=='/':
-                self.calibrationDir = self.calibrationDir[:-1]
-            self.calibrations = glob(f'{self.calibrationDir}/*.check')+glob(f'{self.calibrationDir}**/*/*.check')
-            self.calibrations = [cal for cal in self.calibrations if cal[-6:]=='.check']
-            self.calibrations = np.array([cal for cal in self.calibrations if cal.split('/')[-1][:3]=='cal'])
+            self.calibrationDir = calDir.rstrip('/')
+            self.calibrations = glob(os.path.join(self.calibrationDir, '**', 'cal*.check'), recursive=True)
+            self.calibrations = np.array([cal for cal in self.calibrations if not any(sub in os.path.basename(cal.rstrip('/')) for sub in self.skipCals)])
             self.calibrationTimes = [cal.split('/')[-1].strip('cal_').strip('.check').replace('Z','').replace('_','') for cal in self.calibrations]
             self.calibrationTimes = [str.join('',re.split('-aref\d',cal)) for cal in self.calibrationTimes]
             self.calibrationTimes = Time([time_from_event(cal[:8]+'_'+cal[8:]+'Z') for cal in self.calibrationTimes],scale='utc')
@@ -696,6 +711,75 @@ class Station:
                     p.stop()
              
             return(ddSpec,startTimes,thEW[0],thNS[0],hasData)
+
+    def beamform_event_onsource_quick(self,files,srceName,DM,ep0,secWin = 0.03*u.s,timeOffset = 0*u.s,find_cal=True,skipOrder=[],thetaYOff = 0,verbose=False,**kwargs): 
+                ep0Time = Time(ep0, scale='utc')
+                if 'ra' in kwargs and 'dec' in kwargs:
+                    thEW,thNS = get_source_angles(ep0Time + np.ones(1)*timeOffset,srceName=srceName,
+                                                                stationAngle = self.stationAngle,stationLoc = globals()[f'{self.stationID}Center'],ra=kwargs['ra'],dec=kwargs['dec'])
+                else:
+                    thEW,thNS = get_source_angles(ep0Time + np.ones(1)*timeOffset,srceName=srceName,
+                                                stationAngle = self.stationAngle,stationLoc = globals()[f'{self.stationID}Center'])
+                hasData = False
+                if secWin>0:
+                    epPulse = ep0Time+(4148.8*(u.s*u.MHz**2) * DM * (1/self.freq**2 - 1/self.fRef**2))
+                    epPulse+=timeOffset
+                else:
+                    centers,widths = self.get_center_time(files,0)
+                    good = widths > 0
+                    pack = (self.fpp if self.nRow > 1 else 1/self.fpp)*self.timeFrame
+                    secWin = np.nanmin(widths[good])/2-3*pack
+                    epPulse = centers[np.repeat(np.arange(len(centers)), self.nChan//self.nOrder)]
+                if self.nRow>1:
+                    if find_cal:
+                        self.find_best_cal(Time(ep0, scale='utc'),verbose=verbose)
+                    BFMY = self.get_BFMY(np.sin(thNS[0]),0,files=files,verbose=verbose)
+                else:
+                    BFMY=None
+                Binv = calc_Binv(freq=self.freq,spacing=self.sepX,beam0=self.xBeam0,f0=400*u.MHz,nAnt=self.nAnt,nBeam=self.nAnt,flipPos=False).to_value(u.dimensionless_unscaled)
+                Bew  = np.exp(2j*np.pi*(self.pos1.to_value(u.m)[:, None]*np.sin(thEW[0].to_value(u.rad))/self.lamb.to_value(u.m)[None, :]))     # (nAnt, nChan)
+                Wew   = np.einsum('if,ibf->fb', Bew, Binv)  
+                pixWin = int(secWin * 2 / self.timeFrame)
+                pixWin = (pixWin // 4) * 4
+                
+                ddSpec = np.zeros((self.nChan, pixWin), dtype=np.complex64)
+                startTimes = Time(np.zeros(self.nChan),format='unix')
+        
+                combined_dd_inten = []
+                combinedFreq = []      # To store frequencies per file
+                winLenList = []  
+        
+                procs = []
+                # print(files)
+                try:
+                    for i in range(len(files)):
+                        # print(f'Create Proc {i}',flush=True)
+                        procs.append(Reader(i,verbose=verbose))
+                    for i,p in enumerate(procs):
+                        # print(f'Start Proc {i}',flush=True)
+                        p.start()
+                    for i,p in enumerate(procs):
+                        if verbose:
+                            print(f'Submit for {p.poolID}')
+                        p.redo_first_quick([files[i],self.byteMeta,self.bytePack,skipOrder,self.nOrder,self.fpp,
+                                                self.timeFrame,self.nRow,self.nSubCh,self.orderOff,epPulse,secWin,
+                                                self.fl2int,BFMY,Wew,self.scale,pixWin,self.beamform,self.freq,self.sepX])
+                    for p in procs:
+                        if verbose:
+                            print(f'Waiting for {p.poolID}')
+                        res = p.front_pipe.recv()
+                        if res[0] == 'Success':
+                            hasData=True
+                            message,ddSpec2,startTimes2,chLow = res
+                            ddSpec[chLow:chLow+self.nSubCh] = ddSpec2
+                            startTimes[chLow:chLow+self.nSubCh] = startTimes2
+                        else:
+                            print(res[0])
+                finally:
+                    for p in procs:
+                        p.stop()
+                 
+                return(ddSpec,startTimes,thEW[0],thNS[0],hasData)
         
     def fold_on_target(self,files,ep0,nSample=20000,period = 1*u.s,DM = 0*u.pc/u.cm**3,nBins = 256,find_cal=True,useSource=True,**kwargs):
         Binv = calc_Binv(freq=self.freq,spacing=self.sepX,beam0=self.xBeam0,f0=400*u.MHz,nAnt=self.nAnt,nBeam=self.nAnt,flipPos=False)
@@ -1091,6 +1175,14 @@ class Station:
             print(epCenters[np.isfinite(epCenters)].isot)
         return(epCenters,widths)
         
+    def check_free(self,time):
+        free = False
+        for i in range(len(self.freeStart)):
+            free = time.hour>=self.freeStart[i] and time.hour<self.freeStop[i]
+            if free:
+                return(free)
+        return(free)
+    
     @property
     def pos1(self):
         p1 = np.arange(self.nAnt)*self.sepX
@@ -1142,6 +1234,9 @@ class Station:
             beamform = getattr(bf,config['Format'].get('beamform','beamform256'))
         except:
             beamform=None
+        starts = [int(item.strip()) for item in config['General'].get('freeStart','').split(',') if item.strip()]
+        stops = [int(item.strip()) for item in config['General'].get('freeStop','').split(',') if item.strip()]
+        skipCals = [item.strip() for item in config['Format'].get('skipCals','').split(',') if item.strip()]
         return(cls(nAnt =config['Geometry'].getint('nAnt',16),
             nRow = config['Geometry'].getint('nRow',16),
             nChan = config['Spectral'].getint('nChan',1024), nOrder = config['Spectral'].getint('nOrder',8),
@@ -1156,8 +1251,9 @@ class Station:
             targetIP = config['General'].get('TargetIP','140.109.178.116'),
             stationID = config['General'].get('stationID','STN'),bwLimit=config['General'].getint('bwLimit',1),
             saveDir=config['General'].get('saveDir','./'),calFormat=config['Format'].get('calFormat','.txt'),
-            username = config['General'].get('username',os.getlogin()),stationAngle = config['Geometry'].getfloat('stationAngle',-3.)*u.deg)
-                )
+            username = config['General'].get('username',os.getlogin()),stationAngle = config['Geometry'].getfloat('stationAngle',-3.)*u.deg,
+            freeStart = starts,freeStop=stops,skipCals=skipCals
+                ))
         
         
 
@@ -1182,6 +1278,8 @@ class Reader(Process):
             self.single_event__(message[1])
         elif message[0] == "redo first":
             self.redo_first__(message[1])
+        elif message[0] == "redo first quick":
+                    self.redo_first_quick__(message[1])
         elif message[0] == "fold":
             self.fold_on_source__(message[1])
         else:
@@ -1197,6 +1295,10 @@ class Reader(Process):
         self.front_pipe.send(["read",x])
     def redo_first(self,x):
             self.front_pipe.send(["redo first",x])
+
+    def redo_first_quick(self,x):
+        self.front_pipe.send(["redo first quick",x])
+
     def fold_on_source(self,x):
         self.front_pipe.send(["fold",x])
 
@@ -1627,6 +1729,136 @@ class Reader(Process):
             self.back_pipe.send([e])
             return(None,None,None)
 
+    def NS_beamform_quick(self,nRow,nOrder,timeFrame,nSubCh,
+                        byteMeta,bytePack,fpp,orderOff,fl2int,beamform,scale,
+                        fbin,skipOrder,epPulse,secWin,BFMY,Wew,pixWin):
+            try:
+                # print(f'Start File {fbin}',flush=True)
+                sz = self.file_size_check(fbin)
+                if sz<0:
+                    self.back_pipe.send(['No File'])
+                    return(None,None,None)
+                # skip zero-length target files
+                if sz == 0:
+                    if self.verbose:
+                        print(f"Skipping (size=0): {fbin}")
+                    self.back_pipe.send(['File Size=0'])
+                    return(None,None,None)
+                packMax = (sz - byteMeta) // bytePack
+            
+                if not os.access(fbin, os.R_OK):
+                    self.back_pipe.send(['Cannot Open File'])
+                    return(None,None,None)
+    
+                od,tmp = self.get_header(fbin)
+                if self.verbose:
+                    print(f'\n--- Processing File {self.poolID}: {fbin} (order {od}) ---')
+                
+                if od in skipOrder:
+                    self.back_pipe.send(['Order Skipped'])
+                    return(None,None,None)
+                # print('Get Times',flush=True)
+                # if self.verbose:
+                    # print('Before time set',flush=True)
+                epBegin = Time(tmp[2],format='unix') + 2*u.s + (tmp[0] - tmp[4]) // nOrder * fpp * timeFrame
+                # if self.verbose:
+                    # print('After time set',flush=True)
+                epEnd = epBegin + packMax // nRow * fpp * timeFrame
+                chLow = nSubCh * (od-orderOff)
+                chHigh = nSubCh * (od-orderOff + 1) - 1
+                epLow = epPulse[chLow]
+                epHigh = epPulse[chHigh]
+                
+                # p1, p2 are nearest packet to the requested frame
+                ## fix: increase margin to make sure [p1,p2] convers the window
+                # print(epHigh.isot,secWin,epBegin.isot,flush=True)
+                # if self.verbose:
+                    # print('Before ps set',flush=True)
+                p1 = int(((epHigh - secWin - epBegin) / (fpp * timeFrame) - 1).to_value(u.dimensionless_unscaled)) * nRow
+                p2 = int(((epLow + secWin - epBegin) / (fpp * timeFrame) + 1).to_value(u.dimensionless_unscaled)) * nRow
+                # if self.verbose:
+                    # print(f'Packets {p1} -> {p2}',flush=True)
+                # if self.verbose:
+                    # print('After ps set',flush=True)
+                if p1<0 or p2>=packMax:
+                    self.back_pipe.send(['Packet Out of Bounds'])
+                    return(None,None,None)
+                # p1 = max(p1,0)
+                # p2 = min(p2,packMax-1)
+                if p2<p1:
+                    self.back_pipe.send(['Packet Order Error'])
+                    return(None,None,None)
+                #p1 = int((ep_h - secWin - ep_begin) / (frame_per_pack * timeFrame)) * nRow
+                #p2 = int((ep_l + secWin - ep_begin) / (frame_per_pack * timeFrame)) * nRow
+                nPack = p2 - p1
+                # print(nPack,flush=True)
+                nFrame = int(nPack / nRow * fpp)
+                # print(nFrame,flush=True)
+                nPack = nFrame * int(nRow / fpp)
+                # print(nPack,flush=True)
+                p2 = p1 + nPack
+                # print(p2,flush=True)
+    
+                if self.verbose:
+                    print(f'File {self.poolID}: packMax={packMax}, ep_begin={epBegin.isot}, ep_end={epEnd.isot}')
+                    print(f'File {self.poolID}: p1={p1}, p2={p2}, nPack={nPack}, nFrame={nFrame}')
+    
+                ## nFrame should be multiple of 16
+                nPack = int(nFrame / 16) * 16 * 4
+                nFrame = nPack / 4
+                nSample = int(nFrame)
+    
+                # print('Read Data',flush=True)
+                fpga = np.memmap(fbin, dtype='u1', mode='r')
+                p0 = p1
+                data_off = byteMeta + bytePack * p0
+                data = fpga[data_off:]
+    
+                # v1 = np.zeros((nSubCh, nAnt, 2), dtype='<i2')
+                # v1[:, beamIDX, 0] = fl2int
+                w  = Wew[chLow:chLow+nSubCh]
+                S  = 16*fl2int/np.abs(w).max()                                                    # same headroom as today's one-hot
+                v1 = np.stack([np.round(w.real*S), np.round(w.imag*S)], -1).astype('<i2')
+                BFMYvec = BFMY[0, :, chLow:chLow + nSubCh].T * fl2int
+                v2 = BFMYvec.ravel().view('<f8').reshape((nSubCh, nRow, 2)).astype('<i2')
+    
+                # print('Beamform',flush=True)
+                res = np.ones((nSubCh, nSample), dtype='<c8')
+                # print(f'Read File {fbin}',flush=True)
+                beamform(res, data, v1, v2, nSample, scale)
+                # print(f'Dedisperse File {fbin}',flush=True)
+                res *= fl2int/S
+    
+                ep1 = epBegin + (p1//nRow)*fpp*timeFrame
+                pixStart = ((epPulse[chLow:(chLow+nSubCh)] - secWin - ep1) / timeFrame).to_value(u.dimensionless_unscaled).astype(int)
+                
+                startTimes = ep1 + pixStart*timeFrame
+    
+                if self.verbose:
+                    print('first pix:', pixStart[-1])
+    
+                ddSpec = np.zeros((nSubCh, pixWin), dtype=np.complex64)
+                if self.verbose:
+                    print(f'{self.poolID}: Start Desdispersion',flush=True)
+                # print('Dedisperse',flush=True)
+                for chi in range(nSubCh):
+                    # print(chi,flush=True)
+                    if pixStart[chi]>=0:
+                        pp = pixStart[chi]
+                        tmp = res[chi, pp:pp+pixWin]
+                        max_len = tmp.size
+                        ddSpec[chi,:max_len] = tmp[:]
+                    else:
+                        pp = pixStart[chi]
+                        if pp+pixWin>0:
+                            tmp = res[chi, :pixWin+pp]
+                            max_len = tmp.size
+                            ddSpec[chi,-pp:-pp+max_len] = tmp[:]
+                return(ddSpec,startTimes,chLow)
+            except Exception as e:
+                self.back_pipe.send([e])
+                return(None,None,None)
+
     def single_row_data(self,nAnt,nOrder,timeFrame,nSubCh,
                                             byteMeta,bytePack,fpp,orderOff,
                                             fbin,skipOrder,epPulse,secWin,column,pixWin):
@@ -1855,6 +2087,16 @@ class Reader(Process):
         else: 
             print(rowSpec.shape)
             ddSpec = rowSpec[0]
+        self.back_pipe.send(['Success',ddSpec,startTimes,chLow])
+
+    def redo_first_quick__(self,x):
+        fbin,byteMeta,bytePack,skipOrder,nOrder,fpp,timeFrame,nRow,nSubCh,orderOff,epPulse,secWin,fl2int,BFMY,Wew,scale,pixWin,beamform,freq,spacing = x
+        
+        ddSpec, startTimes, chLow = self.NS_beamform_quick(nRow,nOrder,timeFrame,nSubCh,
+                        byteMeta,bytePack,fpp,orderOff,fl2int,beamform,scale,
+                        fbin,skipOrder,epPulse,secWin,BFMY,Wew,pixWin)
+        if ddSpec is None:
+            return
         self.back_pipe.send(['Success',ddSpec,startTimes,chLow])
 
     def fold_on_source__(self,x):

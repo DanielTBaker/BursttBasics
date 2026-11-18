@@ -5,8 +5,13 @@ import numpy as np
 
 from .packet_func import *
 from .burstt_const import *
-from tqdm.notebook import tqdm
-from scipy.special import erfc
+from scipy.special import erfcx
+try:
+    import emcee
+    hasEmcee = True
+except:
+    hasEmcee = False
+
 
 def gau1(x,A,x0,s,C):
     """ A simple 1D gaussian.
@@ -221,3 +226,126 @@ def shiftArr(arr,x,xExpected,coher = False):
         x2 = np.linspace(0,x.shape[0]-1,x.shape[0])*(x[1]-x[0])
         x2 -= x2[x2.shape[0]//2]
     return(shiftedArr,x2)
+
+
+def format_sci_with_error(val, err,unit=u.dimensionless_unscaled, **kwargs):
+    # Determine the exponent of the value
+    
+    exponent = int(np.floor(np.log10(np.abs(val)))) if val != 0 else 0
+    # Scale both values by the exponent
+    scaled_val = val / (10 ** exponent)
+    scaled_err = err / (10 ** exponent)
+    if "decimals" in kwargs:
+        decimals = kwargs['decimals']
+    else:
+        decimals = int(np.floor(np.log10(np.abs(val)))-np.floor(np.log10(err)))
+        decimals=max(decimals,0)
+        if f'{scaled_err:.{decimals}f}'[-1]=="1":
+            decimals+=1
+    while np.abs(scaled_val)>=10-5*10**(-decimals-1):
+            scaled_val/=10
+            scaled_err/=10
+            exponent+=1
+    if "exponent" in kwargs:
+        decimals += kwargs['exponent'] - exponent
+        scaled_val*=10**(-kwargs['exponent'] + exponent)
+        scaled_err*=10**(-kwargs['exponent'] + exponent)
+        exponent = kwargs['exponent']
+    # Return formatted string
+    decimals=max(decimals,0)
+    if exponent == 0:
+        return f'{scaled_val:.{decimals}f} ± {scaled_err:.{decimals}f} {unit}'
+    else:
+        return f'{scaled_val:.{decimals}f} ± {scaled_err:.{decimals}f} x 10^{exponent} {unit}'
+
+def ddm_delay_phase(freq,dDM,tau,phi0):
+    fu = freq<<u.MHz
+    dDMu = dDM<<(u.pc/u.cm**3)
+    delay = (-(dDMu/K)*(1/fu**2) + (tau<<u.ns)).to(u.ns)
+    phi = 2*np.pi*((fu*delay)).to_value(u.dimensionless_unscaled)+phi0
+    phi -= (2*np.pi*300*u.MHz*(-(dDMu/K)*(1/(300*u.MHz)**2) + (tau<<u.ns)).to(u.ns)).to_value(u.dimensionless_unscaled)
+    return(phi)
+
+def flat_fit(freq,dDM,tau,phi0):
+    phi = ddm_delay_phase(freq,dDM,tau,phi0)
+    model = np.exp(1j*phi)
+    model = np.hstack([model.real, model.imag])
+    return(model)
+
+def smart_sampler(nwalkers,ndim,logL,pos,args=(),maxLoops=100,checkInterval=100,minBurn=500,vectorize=False,ignoreTau = []):
+    oldTau = np.inf
+    converged = False
+
+    ## Start sampler
+    sampler = emcee.EnsembleSampler(
+        nwalkers, ndim, logL, args=args,vectorize=vectorize)
+    
+    
+    state = sampler.run_mcmc(pos, nsteps=checkInterval)
+    use = [i for i in range(ndim)]
+    for id in ignoreTau:
+        use.remove(id)
+    for loop in range(maxLoops):
+        state = sampler.run_mcmc(state, nsteps=checkInterval)
+        tau = sampler.get_autocorr_time(quiet=True)[use]
+                
+        
+        
+        converged0 = np.all(tau * 50 + minBurn < sampler.iteration)
+        converged1 = np.all(np.abs(oldTau - tau) <= tau*0.01)
+        
+        if converged1*converged0:
+            converged=True
+            break
+            
+        oldTau = tau
+    
+    # 4. Determine Burn-In Length & Thinning
+    # The standard recommendation is to discard 2 * max(tau) as burn-in
+    finalTau = sampler.get_autocorr_time(quiet=True)[use]
+    burnIn = max(int(2 * np.max(finalTau)),minBurn)
+    thinning = int(0.5 * np.min(finalTau))
+    lp = np.median(sampler.get_log_prob(discard=burnIn), axis=0)
+    good = lp > np.median(lp) - 10
+    flat = sampler.get_chain(discard=burnIn)[:, good, :].reshape(-1, ndim)
+    return(sampler,flat,converged)
+
+def lnp_phase(d, rho):
+    """log p(phase error d | channel S/N rho) for complex Gaussian noise; stable for any rho."""
+    c = rho*np.cos(d)/np.sqrt(2)
+    small = c < 5
+    out = np.empty_like(c)
+    # e^{c^2}(1+erf c) = 2e^{c^2} - erfcx(c); evaluate directly where it can't overflow
+    cs = c[small]
+    out[small] = -rho[small]**2/2 + np.log1p(np.sqrt(np.pi)*cs*erfcx(-cs))
+    # large c: the 1 and erfcx terms are negligible -> Gaussian-like limit
+    cl, rl, dl = c[~small], rho[~small], d[~small]
+    out[~small] = -0.5*(rl*np.sin(dl))**2 + np.log(2*np.sqrt(np.pi)*cl)
+    return out - np.log(2*np.pi)
+
+def lnL_rician(theta, f, phi_obs, rho):
+    dDM,tau,phiRef = theta
+    if not (np.isfinite(dDM) and np.isfinite(tau) and np.isfinite(phiRef)):
+        print(f'failed ddM: {dDM}, tau: {tau}, phiRef: {phiRef}')
+        return -np.inf
+    if np.abs(tau) > 1280 or np.abs(phiRef) > np.pi or np.abs(dDM)>1e-4:
+        return(-np.inf)
+    return np.sum(lnp_phase(phi_obs - ddm_delay_phase(f, dDM,tau,phiRef),rho))
+
+def rho_from_projection(theta, V, sigC, f, ok):
+    # 3) unbiased amplitude estimate per channel (error = sigC)
+    A = (V*np.exp(-1j*ddm_delay_phase(f, *theta))).real
+    # 4) weighted power-law fit; for fixed alpha, A0 is linear least squares
+    x, w, Ao = f[ok]/400, 1/sigC[ok]**2, A[ok]
+    best = (np.inf,)
+    for al in np.linspace(-6, 2, 201):
+        m = x**al
+        A0 = np.sum(w*Ao*m)/np.sum(w*m*m)
+        chi = np.sum(w*(Ao - A0*m)**2)
+        if chi < best[0]:
+            best = (chi, al, A0)
+    _, al, A0 = best
+    # 5) rho per channel
+    rho = np.clip(A0*(f/400)**al, 0, None)/sigC
+    rho[~ok] = np.nan
+    return rho, A0, al

@@ -46,6 +46,24 @@ class StationDump:
                 files = [f for f in files if eventID in f and str(beam)+'.npz' in f]
             self.file = os.path.join(baseDir,self.station,files[0])
 
+    def _fill_empty_ep0(self):
+        empty = self.ep0 < Time('1991-02-27T00:00:00')
+        if not empty.any() or empty.all():
+            self.emptyChan = empty
+            return
+        delay = (self.DM/K)*(1/self.freq**2)
+        dt = self.time[1]-self.time[0]
+        good = np.where(~empty)[0]
+        new = self.ep0.copy()
+        for c in np.where(empty)[0]:
+            k = good[np.argmin(np.abs(good - c))]                 # nearest valid channel
+            n = np.round(((delay[c] - delay[k])/dt).to_value(u.dimensionless_unscaled))
+            new[c] = self.ep0[k] + n*dt
+        self.ep0 = new
+        self.emptyChan = empty
+
+
+
     
     def load_file(self):
         """
@@ -92,6 +110,7 @@ class StationDump:
         self.coherentDM = False
         self.appliedDM = 0*u.pc/u.cm**3
         self.removedDelay = 0 * u.ns
+        self._fill_empty_ep0()
 
     def load_event(self,baseDir,eventID,beam,oldVersion=False,sharedDir=False):
         """
@@ -307,7 +326,7 @@ class StationDump:
         ## Determine desired shift in samples
         shift = ((newEp0-self.ep0)/sampleSpacing).to_value(u.dimensionless_unscaled)
         ## Divide shift into pixel and sub pixel settings
-        coarseShift = np.round(shift).astype(int)
+        coarseShift = np.floor(shift).astype(int)
         fineShift = shift-coarseShift
         ## Apply pixel shifts
         for i in range(self.freq.shape[0]):
