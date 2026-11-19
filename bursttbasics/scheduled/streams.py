@@ -8,7 +8,7 @@ import os
 import sys
 
 
-from ..packet_func import *
+from ..packet_func import toSigned
 from ..burstt_func import *
 from ..burstt_const import *
 from tqdm.notebook import tqdm
@@ -182,7 +182,8 @@ class Stream:
 
         ## Number of blocks per file
         self.nBlock = 0
-        
+
+        ## Number of frames per blocks
         self.blockFrame = 0
 
         ## Frequency Information
@@ -204,52 +205,13 @@ class Stream:
     
     def packet_from_time(self,time):
         return(np.round(((time-Time(self.blockEpoch0,format='unix'))/self.frameSec).to_value(u.dimensionless_unscaled)))
-    
-    def read_range_order(self,order,ts,nSample,outputSpec = None,verbose=False,flat=False,useNAN=False):
-        if flat and isinstance(ts,int):
-            ts = np.ones(self.nChan)*ts
-        if outputSpec is None:
-            outputSpec = self.basic_spec(self.nChan,nSample)
-            if useNAN:
-                outputSpec*=np.nan
-        chanOffset=0
-        if outputSpec.shape[1]>self.nChan:
-            chanOffset=self.nChan*order
-        te = ts[chanOffset:chanOffset + self.nChan] + nSample
-        mask = (te.max()<=self.blockStart[order*self.nEpochs:(order+1)*self.nEpochs])
-        mask += (ts[chanOffset:chanOffset + self.nChan].min()>=self.blockStart[order*self.nEpochs:(order+1)*self.nEpochs]+self.blockFrame)
-        use = np.argwhere(~mask)
-        epochID = use[:,0]
-        blockID = use[:,1]
-        fileID = use[:,2]
-        fileStarts = self.blockStart[order*self.nEpochs+epochID,blockID,fileID]
-        startOrder = np.argsort(fileStarts)
-        epochID = epochID[startOrder]
-        blockID = blockID[startOrder]
-        fileID = fileID[startOrder]
-        fileStarts = fileStarts[startOrder]
-        startPx = fileStarts[:,np.newaxis]-ts[np.newaxis,chanOffset:chanOffset + self.nChan]
-        x = np.maximum(startPx,0)
-        y = np.maximum(-startPx,0)
-        l = np.maximum(np.minimum(nSample-x,self.blockFrame-y),0)
-        iterator = range(fileID.shape[0])
-        # print(f'{self.station} {order} : {x.max(1)} {y.max(1)} {l.max(1)} {blockID}\n',flush=True)
-        if verbose:
-            iterator = tqdm(iterator)
-        for blockNum in iterator:
-            # print(self.fbystamp[order*self.nEpochs+epochID[blockNum]][fileID[blockNum]].split("/")[-1])
-            if flat:
-                outputSpec[x[blockNum,0]:x[blockNum,0]+l[blockNum,0],chanOffset:chanOffset+self.nChan] = loadBeam(self.fbystamp[order*self.nEpochs+epochID[blockNum]][fileID[blockNum]],
-                                nStart=blockID[blockNum],nBlock=1,nFrame=self.blockFrame,
-                                nChan=self.nChan,hdlen=self.headSize,verbose=verbose)[0][0][y[blockNum,0]:y[blockNum,0]+l[blockNum,0]]
-            else:
-                beam = loadBeam(self.fbystamp[order*self.nEpochs+epochID[blockNum]][fileID[blockNum]],
-                                nStart=blockID[blockNum],nBlock=1,nFrame=self.blockFrame,
-                                nChan=self.nChan,hdlen=self.headSize,verbose=verbose)[0][0]
-                # print(np.abs(beam).max())
-                for chan in range(self.nChan):
-                    outputSpec[x[blockNum,chan]:x[blockNum,chan]+l[blockNum,chan],chanOffset+chan] = beam[y[blockNum,chan]:y[blockNum,chan]+l[blockNum,chan],chan]
-        return(outputSpec)
+
+    def time_to_frames(self,time):
+        if isinstance(time,np.ndarray):
+            frames = (time/(self.frameSec*self.rebin)).to_value(u.dimensionless_unscaled).astype(int)
+        else:
+            frames = int((time/(self.frameSec*self.rebin)).to_value(u.dimensionless_unscaled))
+        return(frames)
         
     def _get_epochs(self,config,notebook=False, progressOrder = -1):
         """ Determine start time for all blocks in dataset.
@@ -265,181 +227,10 @@ class Stream:
         self.nEpochs = 0
 
 
-    def load_chain(self,order,segment,verbose=False):
-        try:
-            files = []
-            bID = np.zeros(0)
-            fID = 0
-            bID2 = bID
-            spec  = np.zeros((segment[2], self.blockFrame, self.nChan), dtype=np.complex64)
-            pcnt  = np.zeros(segment[2], dtype=np.int64)
-            epoch = np.zeros(segment[2])
-        except Exception as e:
-            print(f'In load_chain({sys.exc_info()[2].tb_lineno}): {e}',flush=True)
-            print(segment)
-            raise(e)
-        return(spec, pcnt, epoch)
-            
-    def read_order(self,epoch,startBlock,length,order,verbose=False):
-        """Read a continuous series of blocks for a single subband.
-
-        Parameters
-        ----------
-        epoch: int
-            Epoch ID of starting block
-        startBlock: int
-            Block ID of starting block
-        length: int
-            Number of blocks to read.
-        Order: int
-            Subband ID.
-
-        Returns
-        -------
-        spec: array-like
-            Voltage spectrum for the given suband spanning the given blocks
-        """
-
-        ## Read "length" blocks of data starting at the "startBlock"th block in "epoch" for a given subband
-        segments = [[epoch,startBlock,length]]
-        while segments[-1][1]+segments[-1][2]>self.nBlock*self.nf:
-            newEpoch = segments[-1][0]+1
-            newStarts = 0
-            newLength = segments[-1][1]+segments[-1][2] - self.nBlock*self.nf
-            segments[-1][-1]-=newLength
-            segments.append([newEpoch,newStarts,newLength])
-        try:
-            spec, pcnt, falseEpoch = self.load_chain(order,segments[0],verbose)
-        except Exception as e:
-            print(f'{segments} ({self.nEpochs*order+segments[0][0]}/{len(self.fbystamp)}):{e}')
-            spec = np.zeros((int(self.blockFrame*length/self.rebin),self.nChan),dtype=np.complex64)*np.nan
-        for i in range(len(segments)-1):
-            try:
-                spec2, pcnt, falseEpoch = self.load_chain(order,segments[i+1],verbose)
-            except Exception as e:
-                print(f'{segments} ({self.nEpochs*order+segments[0][0]}/{len(self.fbystamp)}):{e}')
-                spec2 = np.zeros((int(self.blockFrame*length/self.rebin),self.nChan),dtype=np.complex64)*np.nan
-            spec = np.concatenate((spec,spec2),axis=0)
-        return(spec)
-
     def basic_spec(self,nChans,nFrames):
         spec = np.zeros((nFrames,nChans),dtype=np.complex64)
         return(spec)
     
-
-    def read_order_dedis(self,epoch,startBlock,length,order,pxStart,nFrame,baseOff,verbose=False):
-        """Read and desdisperse a section of data for a given subband
-
-        Parameters
-        ----------
-        epoch: int
-            Epoch ID of starting block
-        startBlock: int
-            Block ID of starting block
-        length: int
-            Number of blocks to read.
-        Order: int
-            Subband ID.
-        pxStart: array-like
-            Number of frames offset from reference frequency at each frequency
-        nFrame: int
-            Number of frames in dedispersed array
-        baseOff:
-            Number of frames offset from start of block containing start time at
-            reference frequency to start of starting block
-        Returns
-        -------
-        spec: array-like
-            Voltage spectrum for the given suband
-        """
-        ## As above, but incoherently dedisperses and only saves a portion of the data
-        try:
-            spec = self.basic_spec(self.nChan,nFrame+20)
-            e = epoch
-            b = startBlock
-            px = np.linspace(0,int(self.blockFrame/self.rebin)-1,int(self.blockFrame/self.rebin),dtype=int)+baseOff
-            pxEnd = np.round(pxStart).astype(int)+nFrame+20
-            pxStartI = np.round(pxStart).astype(int)
-            for bid in range(length):
-                bspec, pcnt, falseEpoch  = self.load_chain(order,[e,b,1],verbose=verbose)
-                for i in range(bspec.shape[2]):
-                    if (pxEnd[i] > px[0]) and (pxStartI[i] < px[-1]):
-                        ss = max(0,px[0]-pxStartI[i])
-                        se = min(nFrame+20,px[-1]-pxStartI[i]+1)
-                        bss = max(0,pxStartI[i]-px[0])
-                        bse = min(int(self.blockFrame/self.rebin),pxEnd[i]-px[0])
-                        spec[ss:se,i] = bspec[0,bss:bse,i]
-                px+=int(self.blockFrame/self.rebin)
-                b+=1
-                if b==self.nBlock*self.nf:
-                    b=0
-                    e+=1
-        except Exception as e:
-            print(f'In read_order_dedis({sys.exc_info()[2].tb_lineno}): {e}',flush=True)
-            raise(e)
-        return(spec)
-
-    def time_to_frames(self,time):
-        if isinstance(time,np.ndarray):
-            frames = (time/(self.frameSec*self.rebin)).to_value(u.dimensionless_unscaled).astype(int)
-        else:
-            frames = int((time/(self.frameSec*self.rebin)).to_value(u.dimensionless_unscaled))
-        return(frames)
-
-    def read_around_dedis(self,fref,tCent,tWidth,coherent = True):
-        """Read and dedisperse all subands to cover a given time range at the reference frequency
-
-        Parameters
-        ----------
-        fref: Astropy.Quantity
-            Reference frequency for dedispersion
-        tCent: Astropy.Time of Astropy.Quanity
-            Center of desired time range at reference frequency.
-        """
-        
-        ## Convert reference time to unix
-        if isinstance(tCent,Time):
-            tRef = tCent
-        else:
-            tRef = self.epoch0 + tCent
-        tEnd = tRef + tWidth
-        tStart = tRef - tWidth
-        ## Calculate dispersion delay for each frequency
-        try:
-            dispersionDelay = ((self.DM/K)*(1/self.freq**2 - 1/fref**2)).to(u.s)
-        except:
-            dispersionDelay = np.zeros(self.freq.shape[0])*u.s
-        ## Calculate number of frames in final spectrum
-        nFrames = self.time_to_frames(2*tWidth)
-    
-        ## Find start and end at each frequency
-        tStartDispersed = tStart+dispersionDelay
-        pxStartDispersed = self.packet_from_time(tStartDispersed).astype(int)
-        spec = self.basic_spec(self.nChan0,nFrames)
-        ep0 = self.time_from_packet(pxStartDispersed)
-        for order in range(self.nOrder):
-            self.read_range_order(order,pxStartDispersed,nFrames,outputSpec=spec)
-        return(spec,ep0)
-
-    def read_block(self,p0,nFrames):
-            """Read and dedisperse all subands to cover a given time range at the reference frequency
-    
-            Parameters
-            ----------
-            fref: Astropy.Quantity
-                Reference frequency for dedispersion
-            tCent: Astropy.Time of Astropy.Quanity
-                Center of desired time range at reference frequency.
-            """
-            
-        
-            ## Find start and end at each frequency
-            spec = self.basic_spec(self.nChan0,nFrames)
-            pxStart = np.ones(self.nChan0,dtype=int)*p0
-            ep0 = self.time_from_packet(pxStart)
-            for order in range(self.nOrder):
-                self.read_range_order(order,pxStart,nFrames,outputSpec=spec)
-            return(spec,ep0)
 
     def _pulsar_prep(self,config):
         self.ToAs = []
@@ -524,37 +315,13 @@ class Stream:
         self.ToAs = Time(np.array(self.ToAs),format='mjd').unix
         np.save(self.ToAFile,self.ToAs)
 
-    def fold_block(self,fref,epoch,startBlock,nBins = 128,upChan = 1):
-        try:
-            if upChan==1:
-                dispersionDelay = ((self.DM/K)*(1/self.freq**2 - 1/fref**2)).to(u.s)
-            else:
-                freqUP = np.linspace(self.freq[0],self.freq[-1],self.nChan0*upChan)
-                dispersionDelay = ((self.DM/K)*(1/freqUP**2 - 1/fref**2)).to(u.s)
-        except:
-            dispersionDelay = np.zeros(self.freq.shape[0]*upChan)*u.s
-        folded = np.zeros((self.nChan0*upChan,nBins))
-        wts = np.zeros((self.nChan0*upChan,nBins))
-        spec = np.zeros((self.blockFrame//upChan,self.nChan0*upChan))
-        for order in range(self.nOrder):
-            start = self.blockStart[order*self.nEpochs+epoch,startBlock//self.nf,np.mod(startBlock,self.nf)]
-            if start>0:
-                I = self.read_range_order(order,
-                                              np.ones(self.nChan0,dtype=int)*self.blockStart[order*self.nEpochs+epoch,startBlock//self.nf,np.mod(startBlock,self.nf)],
-                                            self.blockFrame,flat=True)
-                I=np.abs(I)**2
-                times = self.time_from_packet(start)+np.linspace(0,self.blockFrame,self.blockFrame,endpoint=False)*self.frameSec
-                phaseRef = self.polyco.eval_phase(times.mjd)
-                pulseFreq = self.polyco.eval_spin_freq(times.mjd.mean())*u.Hz
-                pShift = (dispersionDelay[self.nChan*order:self.nChan*(order+1)]*pulseFreq).to(u.dimensionless_unscaled)
-                for i in range(self.nChan*upChan):
-                    column = I[:,i]
-                    phases =  np.mod(phaseRef-pShift[i]+.5,1)-.5
-                    folded[order*self.nChan+i,:],__ = np.histogram(phases[np.isfinite(column)],weights=column[np.isfinite(column)],bins=np.linspace(-.5,.5,nBins+1))
-                    wts[order*self.nChan+i,:],__ = np.histogram(phases[np.isfinite(column)],bins=np.linspace(-.5,.5,nBins+1))
-        return(folded,wts)
-             
+    def read_blocks(self,startBlock,nBLocks = 1, dropFill = True):
+        return(self.basic_spec(self.nChan0,self.blockFrame))
 
+    def read_blocks_power(self,startBlock,nBLocks = 1, dropFill = True):
+        return(np.abs(self.read_block(startBlock,nBLocks))**2)
+
+    
 class Baseband(Stream):
     """
     Represent and manipulate a series of files representing
@@ -577,6 +344,9 @@ class Baseband(Stream):
         super().__init__(config,name,notebook,progressOrder)
         if self.sourceType == 'pulsar':
             self._pulsar_prep(config)
+        testInts = np.arange(256)
+        self.LUT_COMPLEX = (toSigned(testInts & 0x0f,4)+1j*toSigned(np.right_shift(testInts,4),4)).astype(np.complex64)
+        self.LUT_POWER = (toSigned(testInts & 0x0f,4)**2+toSigned(np.right_shift(testInts,4),4)**2).astype(np.float32)
 
     def _get_fbystamp(self):
         if  os.path.exists(self.fbystampFile):
@@ -721,36 +491,64 @@ class Baseband(Stream):
         self.earliest = self.time_from_packet(self.blockStart[self.blockStart>0].min())
         self.latest = self.time_from_packet(self.blockStart[self.blockStart>0].max()+self.blockFrame-1)
 
-    def load_chain(self,order,segment,verbose=False):
-        try:
-            files = self.fbystamp[self.nEpochs*order+segment[0]]
-            bID = np.linspace(0,segment[2]-1,segment[2],dtype=int)+segment[1]
-            fID = np.mod(bID,self.nf)
-            bID2 = (bID//self.nf).astype(int)
-            spec  = np.zeros((segment[2], self.blockFrame, self.nChan), dtype=np.complex64)
-            pcnt  = np.zeros(segment[2], dtype=np.int64)
-            epoch = np.zeros(segment[2])
+    def repair_block_start(self):
+        ## Block startes per order in block order
+        orderStarts = np.reshape(self.blockStart,(self.nOrder,-1))
+        ## How many blocks off from the start of the run each block thinks the start of the run is
+        blocksOff = np.rint((orderStarts - orderStarts[0,0])/self.blockFrame).astype(int) - np.linspace(0,orderStarts.shape[1],orderStarts.shape[1],endpoint=False).astype(int)
+        changeOff = np.diff(blocksOff,axis=1)
+        ## Find places where a single block differs from its neighbours and the difference is symmetric
+        singleProblems = (changeOff[:,:-1]+changeOff[:,1:] == 0) & (np.abs(changeOff[:,:-1])>0)
+        singleProblems &= (orderStarts[:, :-2] > 0) & (orderStarts[:, 1:-1] > 0) & (orderStarts[:, 2:] > 0)
+        staleHeaders = [[] for i in range(self.nOrder)]
+        for i in range(self.nOrder):
+            ## Get list of wrong headers for order
+            wrongIDs = np.where(singleProblems[i])[0]+1
+            staleHeaders[i]+=list(wrongIDs)
+            ## Loop over all ids of wrong headers
+            for bID in wrongIDs:
+                orderStarts[i,bID] = orderStarts[i,bID-1]+self.blockFrame
+                blocksOff[i,bID] = blocksOff[i,bID-1]
+        self.blockStart = np.reshape(orderStarts,self.blockStart.shape)
+                
 
-            for i in range(segment[2]):
-                tmp = loadBeam(files[fID[i]],
-                            nStart=bID2[i],
-                            nBlock=1,
-                            nFrame=self.blockFrame,
-                            nChan=self.nChan,
-                            hdlen=self.headSize,
-                            verbose=verbose)
-                spec[i]  = tmp[0][0]
-                pcnt[i]  = tmp[1][0]
-                epoch[i] = tmp[2][0]
-        except Exception as e:
-            print(f'In load_chain({sys.exc_info()[2].tb_lineno}): {e}\n',flush=True)
-            print(f'S:{segment}, fl:{len(files)}, fidl:{fID.shape[0]}, i:{i}\n',flush=True)
-        return(spec, pcnt, epoch)
-    
-    def read_order(self,epoch,startBlock,length,order,verbose=False):
-        spec = super().read_order(epoch,startBlock,length,order,verbose)
-        spec = np.reshape(spec,(-1,self.nChan))
+
+    def get_blocks_spec(self,startBlock,nBlocks = 1, dropFill = True):
+        spec=None
+        if dropFill:
+            orderStarts = np.reshape(self.blockStart,(self.nOrder,-1))
+            for order in range(self.nOrder):
+                afterIDs = orderStarts[order,startBlock:min(startBlock+nBlocks,orderStarts.shape[1])]>=orderStarts[order,startBlock]
+                beforeEndIDs = orderStarts[order,startBlock:min(startBlock+nBlocks,orderStarts.shape[1])]<=(orderStarts[order,startBlock]+(nBlocks+.5)*self.blockFrame)
+                orderIDs = np.argwhere(afterIDs & beforeEndIDs)[0]
+                fileNumbers = np.mod(orderIDs,self.nf).astype(int)
+                blockNumbers = np.mod((orderIDs-fileNumbers)//self.nf,self.nBlock)
+                epochNumbers = (orderIDs-blockNumbers*self.nf-fileNumbers)//(self.nf*self.nBlock)
+            pass
+            ## generate contiguous spectra of nBlocks*blockFrame length with 0s for missing data
+        else:
+            pass
+            ## generate spectra of nBlocks*blockFrame length with gaps ignored
         return(spec)
+
+    def read_blocks_power(self,startBlock,nBlocks = 1, dropFill = True):
+        I=None
+        if dropFill:
+            pass
+            ## generate contiguous spectra of nBlocks*blockFrame length with 0s for missing data
+        else:
+            pass
+            ## generate spectra of nBlocks*blockFrame length with gaps ignored
+        return(I)
+
+    def read_file(self,fname,startBlock,nBlocks,table):
+        bb = self.blockByte + self.headSize
+        buf = np.fromfile(fname,dtype=np.uint8,count=nBlocks*bb,offset=startBlock * bb)
+        if buf.size != nBlocks * self.blockByte:
+            raise ValueError(f'{fname}: asked for {nBlocks} blocks from {startBlock}, file has {buf.size // self.blockByte}!')
+        spec = table[buf.reshape(nBlocks,bb)[:,self.headSize:]].reshape((nBlocks,self.blockFrame,self.nChan))
+        return(spec)
+
 
 
 class Intensity(Stream):
