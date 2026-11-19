@@ -2235,7 +2235,8 @@ def calc_Binv(freq=np.linspace(300,700,1024,endpoint=False)*u.MHz,spacing=1*u.m,
     lamb = const.c/freq
     lamb0 = const.c/f0
     nChan = freq.shape[0]
-    sinTheta = (lamb0 / spacing / nAnt * (np.arange(nBeam)+beam0)).to(u.dimensionless_unscaled)
+    # sinTheta = (lamb0 / spacing / nAnt * (np.arange(nBeam)+beam0)).to(u.dimensionless_unscaled)
+    sinTheta = -(lamb0 / spacing / nAnt * (np.arange(nBeam) + beam0))[::-1].to(u.dimensionless_unscaled) 
     BFM0 = np.exp(2.j*np.pi*pos.reshape((1,nAnt,1))/lamb.reshape((1,1,nChan))*sinTheta.reshape((nBeam,1,1)))
     Binv = np.zeros_like(BFM0)
     for ch in range(nChan):
