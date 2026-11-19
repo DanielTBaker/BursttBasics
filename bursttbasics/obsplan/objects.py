@@ -527,10 +527,16 @@ class Station:
 
     def run_simulation(self,target,date,padding=5,**kwargs) -> str:
         checkTimes ='/data/kylin/bin/check_times_bf256_target.py'
+        spacing = ['--s_ew', f'{self.spaceEW.to_value(u.m)}', '--s_ns', f'{self.spaceNS.to_value(u.m)}']
+            # sys.argv = ['', f'{self.beamPars["beam0"]}', '0', target, date, '--site', f'{self.name}', '--ant', 'ASIAALPDA',
+            # '--flim', f'{int(self.fLow.value)}', f'{int(self.fHigh.value)}', '--tlim', f'-{padding}', f'{padding}',
+            # *spacing, '--angle', ' '.join([str(self.beamPars[x]) 
         if self.nRow <=4:
             sys.argv = ['',f'{self.beamPars["beam0"]}','0',
                                     target,date,'--site',f'{self.name}','--ant','ASIAALPDA','--flim',
-                                    f'{int(self.fLow.value)}',f'{int(self.fHigh.value)}','--tlim',f'-{padding}',f'{padding}','--angle',' '.join([str(self.beamPars[x]) for x in self.beamPars if x[:2]=='th'])]
+                                    f'{int(self.fLow.value)}',f'{int(self.fHigh.value)}','--tlim',
+                                    f'-{padding}',f'{padding}',*spacing,'--angle',
+                                    ' '.join([str(self.beamPars[x]) for x in self.beamPars if x[:2]=='th'])]
             print(sys.argv)
             with open(checkTimes, "r") as infile:
                 exec(''.join(infile.readlines()),{})
