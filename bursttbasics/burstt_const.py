@@ -82,6 +82,7 @@ KMNCenter = EarthLocation(lon = 118*u.deg+20*u.arcmin+33.63267*u.arcsec,
                           lat = 24*u.deg+26*u.arcmin + 23.18364*u.arcsec,
                           height = 48.568*u.m
                           )
+PYCCenter = EarthLocation.from_geocentric(-3149184.935, 3966371.235, 3864897.162, unit=u.m)
 
 beamFile = 'beams_altaz_fus_16x16_b-7.5_-7.5_flim400_800_rot-3.0_sky400x700_ew-60_60_ns-70_70_att30n60_cal251027.npy'
 beamBounds = np.load(os.path.join(os.path.dirname(os.path.realpath(__file__)),beamFile), allow_pickle=True).item()
