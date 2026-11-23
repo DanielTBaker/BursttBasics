@@ -278,7 +278,8 @@ def smart_sampler(nwalkers,ndim,logL,pos,args=(),maxLoops=100,checkInterval=100,
 
     ## Start sampler
     sampler = emcee.EnsembleSampler(
-        nwalkers, ndim, logL, args=args,vectorize=vectorize)
+        nwalkers, ndim, logL, args=args,vectorize=vectorize,
+        moves=[(emcee.moves.DEMove(), 0.8), (emcee.moves.DESnookerMove(), 0.2)])
     
     
     state = sampler.run_mcmc(pos, nsteps=checkInterval)
