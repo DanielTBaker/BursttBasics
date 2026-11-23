@@ -326,7 +326,7 @@ class StationDump:
         ## Determine desired shift in samples
         shift = ((newEp0-self.ep0)/sampleSpacing).to_value(u.dimensionless_unscaled)
         ## Divide shift into pixel and sub pixel settings
-        coarseShift = np.floor(shift).astype(int)
+        coarseShift = np.round(shift).astype(int)
         fineShift = shift-coarseShift
         ## Apply pixel shifts
         for i in range(self.freq.shape[0]):
