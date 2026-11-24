@@ -20,8 +20,12 @@ def get_peak_time(s0,width=2048,weight=True,idPeak=None):
     sampleTime = s0.time[1]-s0.time[0]
     if idPeak==None:
         if weight:
-            modelT = s0.profModel(s0.time.to_value(u.ms),*s0.poptT)-s0.poptT[-1]
-            idPeak = np.argmax(modelT)
+            if s0.modelFormat == 'separable':
+                modelT = s0.profModel(s0.time.to_value(u.ms),*s0.poptT)-s0.poptT[-1]
+                idPeak = np.argmax(modelT)
+            else:
+                # scattering = s0.burstfitParameters['scattering_timescale']*(s0.freq.min().to_value(u.MHz)*s0.burstfitParameters['ref_freq'])**s0.burstfitParameters['scattering_index']
+                idPeak = np.round((s0.burstfitParameters['arrival_time']*u.s/sampleTime).to_value(u.dimensionless_unscaled))
         else:
             idPeak = s0.spec.shape[1]//2
     else:
