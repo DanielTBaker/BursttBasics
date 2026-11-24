@@ -15,6 +15,14 @@ from ..packet_func import *
 from ..burstt_const import *
 from ..burstt_func import *
 from scipy.interpolate import interp1d
+import json
+
+try:
+    import bursttbasics.trigger.faradayfit as ff
+    HAS_FITBURST = True
+except:
+    HAS_FITBURST = False
+
 
 
 class StationDump:
@@ -104,8 +112,10 @@ class StationDump:
             self.profModel = globals()[arch['profModel'].item()]
             self.freq_function = globals()[arch['freq_function'].item()]
             self.modeled=True
+            self.modelFormat = 'separable'
         else:
             self.modeled = False
+            self.modelFormat = ''
 
         self.coherentDM = False
         self.appliedDM = 0*u.pc/u.cm**3
@@ -138,6 +148,33 @@ class StationDump:
         self.spec[v2.mask]=np.nan
         self.clipped = True
 
+    def rm_grid(self,Ion,mask,rmMax=120,rmNum = 600,aLow = -5, aHigh = 0, aNum = 25):
+        bestChi = np.inf
+        x = self.freq[mask].value/400
+        lam2 = (const.c/self.freq[mask]).to_value(u.m)**2
+        A = 0
+        pf = 0
+        phi0 = 0
+        N = 0
+        rm = 0
+        a = 0
+        for RMSearch in np.linspace(1,rmMax,rmNum):
+            theta = 2* RMSearch * lam2
+            for aSearch in np.linspace(aLow,aHigh,aNum):
+                xa = x**aSearch
+                X = np.array([xa,xa*np.cos(theta),xa*np.sin(theta),np.ones(x.shape[0])]).T
+                co, resid, rank, sv = np.linalg.lstsq(X, Ion[mask], rcond=None)
+                resid = np.sum((Ion[mask] - X @ co)**2)
+                if resid < bestChi:
+                    bestChi=resid
+                    A = co[0]
+                    pf = np.sqrt(co[1]**2 + co[2]**2)/A
+                    phi0 = np.arctan2(-co[2],co[1])/2.
+                    N = co[-1]
+                    rm = RMSearch
+                    a = aSearch
+        return(A,a,rm,phi0,pf,N)
+
     def fit_spec(self,polFit=True,rbin=400,freqMin = -np.inf,freqMax = np.inf,profModel=gau1,**kwargs):
         """
         Fit a simple pulse profile to the spectrum
@@ -158,6 +195,7 @@ class StationDump:
             self.poptT = np.array([A,t0,w,N])
         # print(prof.max())
         self.poptT,pcov=curve_fit(self.profModel,t2.value,prof,p0=self.poptT)
+        self.poptT[2]=np.abs(self.poptT[2])
         wts = self.profModel(self.time.to_value(u.ms),*self.poptT)-self.poptT[-1]
         wts /= np.nansum(wts)
         spec = self.calc_spec(I,wts,noiseSub=True)
@@ -171,13 +209,20 @@ class StationDump:
             if 'p0f' in kwargs:
                 self.poptF = kwargs['p0f']
             else:
-                A0 = (np.max(spec[fmask]))*(self.freq[fmask][np.argmax(spec[fmask])]/(400*u.MHz))**2
+                # A0 = (np.max(spec[fmask]))*(self.freq[fmask][np.argmax(spec[fmask])]/(400*u.MHz))**2
                 
-                self.poptF = [A0,-2,50,0,.5,0]
-        
+                # self.poptF = [A0,-2,50,0,.5,0]
+                self.poptF = list(self.rm_grid(spec,fmask))
+            if self.poptF[2]<2:
+                self.freq_function = frequency_model
+                self.poptF = [self.poptF[0],self.poptF[1],self.poptF[-1]]
                 self.poptF,pcov = curve_fit(self.freq_function,self.freq[fmask].value,
-                                       spec[fmask],p0=self.poptF,maxfev=10000,
-                                       bounds = ((0,-np.inf,-np.inf,-np.inf,0,-np.inf),(np.inf,0,np.inf,np.inf,1,np.inf)),method='dogbox')
+                                                       spec[fmask],p0=self.poptF,maxfev=10000,
+                                                       bounds = ((0,-np.inf,-np.inf),(np.inf,np.inf,np.inf)),method='dogbox')
+            else:
+                self.poptF,pcov = curve_fit(self.freq_function,self.freq[fmask].value,
+                                    spec[fmask],p0=self.poptF,maxfev=10000,
+                                    bounds = ((0,-np.inf,-np.inf,-np.inf,0,-np.inf),(np.inf,0,np.inf,np.inf,1,np.inf)),method='dogbox')
         else:
             self.freq_function = frequency_model
             if 'p0f' in kwargs:
@@ -189,6 +234,195 @@ class StationDump:
                                        spec[fmask],p0=self.poptF,maxfev=10000,
                                        bounds = ((0,-np.inf,-np.inf),(np.inf,np.inf,np.inf)),method='dogbox')
         self.modeled = True
+        self.modelFormat='separable'
+
+    def fitburst_fit(self,rbt = 16,numIterations = 1,polFit = False, verbose=False,plotOut=None,fitOut=None,**kwargs):
+        if not HAS_FITBURST:
+            raise ImportError('fitburst_fit requires the fitburst package')
+        initialParameters = {"amplitude"        : [-1.0],
+                        "arrival_time"         : [0.0],
+                        "burst_width"          : [0.0005],
+                        "dm"                   : [0.0],
+                        "dm_index"             : [-2.0],
+                        "ref_freq"             : [400],
+                        "scattering_index"     : [-4.0], 
+                        "scattering_timescale" : [.00001],
+                        "spectral_index"       : [-2.0],
+                        "spectral_running"     : [0.0]}
+        if 'arrival_time' in kwargs:
+            initialParameters['arrival_time'] = [kwargs['arrival_time']]
+        elif hasattr(self,'poptT'):
+            initialParameters['arrival_time'] = [self.poptT[1]/1000]
+        if 'burst_width' in kwargs:
+            initialParameters['burst_width'] = [kwargs['burst_width']]
+        elif hasattr(self,'poptT'):
+            initialParameters['burst_width'] = [self.poptT[2]/2000]
+        if 'scattering_timescale' in kwargs:
+            initialParameters['scattering_timescale'] = [kwargs['scattering_timescale']]
+        elif hasattr(self,'poptT'):
+            initialParameters['scattering_timescale'] = [self.poptT[2]/2000]
+        if polFit or self.freq_function == frequency_model_polarized:
+            if 'rm' in kwargs:
+                initialParameters.update({'rm' : [kwargs['rm']]})
+            elif self.freq_function == frequency_model_polarized:
+                initialParameters.update({'rm' : [self.poptF[2]]})
+            else:
+                initialParameters.update({'rm' : [-42.0]})
+            if 'polarization_fraction' in kwargs:
+                initialParameters.update({'polarization_fraction' : [kwargs['polarization_fraction']]})
+            elif self.freq_function == frequency_model_polarized:
+                initialParameters.update({'polarization_fraction' : [self.poptF[4]]})
+            else:
+                initialParameters.update({'polarization_fraction' : [.5]})
+            if 'phi0' in kwargs:
+                initialParameters.update({'phi0' : [kwargs['phi0']]})
+            elif self.freq_function == frequency_model_polarized:
+                initialParameters.update({'phi0' : [self.poptF[3]]})
+            else:
+                initialParameters.update({'phi0' : [0.0]})
+        self.burstfitParameters = initialParameters.copy()
+        data = ff.BURSTTDataReader(self,initialParameters,rbt=rbt)
+        data.preprocess_data(remove_baseline=True)
+        parametersToFix = ["dm_index", "scattering_index"]
+        numComponents = len(initialParameters['burst_width'])
+
+        data.dedisperse(
+            0,
+            initialParameters["arrival_time"][0],
+            ref_freq=initialParameters["ref_freq"][0],
+            dm_offset=0.0
+        )
+        dataWindowed = data.data_full
+        timesWindowed = data.times
+        if 'rm' in initialParameters:
+            model = ff.FaradaySpectrumModeler(
+                data.freqs,
+                timesWindowed,
+                dm_incoherent = 0,
+                factor_freq_upsample = 1,
+                factor_time_upsample = 4,
+                num_components = numComponents,
+                is_dedispersed = data.is_dedispersed,
+                is_folded = False,
+                scintillation = False,
+                verbose = verbose
+            )
+        else:
+            model = ff.SpectrumModeler(
+                data.freqs,
+                timesWindowed,
+                dm_incoherent = 0,
+                factor_freq_upsample = 1,
+                factor_time_upsample = 4,
+                num_components = numComponents,
+                is_dedispersed = data.is_dedispersed,
+                is_folded = False,
+                scintillation = True,
+                verbose = verbose
+            )
+        model.update_parameters(initialParameters)
+
+        for currentIteration in range(numIterations):
+            fitter = ff.fb.analysis.fitter.LSFitter(dataWindowed, model, data.good_freq)
+            fitter.global_parameters.append("rm")
+            fitter.fix_parameter(parametersToFix)
+            fitter.fit(exact_jacobian=True)
+
+            # extract best-fit data for next loop.
+            if fitter.results.success:
+                self.burstfitParameters.update(fitter.fit_statistics["bestfit_parameters"])
+                self.modeled = True
+                self.modelFormat = 'fitburst'
+                model.update_parameters(fitter.fit_statistics["bestfit_parameters"])
+                current_params = model.get_parameters_dict()
+
+                if not any([x == "dm" for x in parametersToFix]):
+                    current_params["dm"] = [x for x in self.burstfitParameters["dm"] * numComponents]
+
+                if "scattering_timescale" not in parametersToFix:
+                    current_params["scattering_timescale"] = [x for x in 
+                                                            self.burstfitParameters["scattering_timescale"] * numComponents] 
+
+                # if this is the last iteration, create best-fit model and plot windowed data.
+                if currentIteration == (numIterations - 1):
+                    if not fitOut is None:
+                        if isinstance(fitOut,str):
+                            with open(fitOut, "w") as out:
+                                json.dump(
+                                    {
+                                        "initial_dm": 0,
+                                        "initial_time": data.times_bin0,
+                                        "model_parameters": self.burstfitParameters,
+                                        "fit_statistics": fitter.fit_statistics,
+                                    },
+                                    out,
+                                    indent=4
+                                )
+                    if not plotOut is None:
+                        model.update_parameters(self.burstfitParameters)
+                        bestfitUncertainties = fitter.fit_statistics["bestfit_uncertainties"]
+                        bestfitModel = model.compute_model(data=dataWindowed)
+                        if verbose:
+                            print(f"INFO: best-fit estimate for {len(self.burstfitParameters['dm'])}-component model:")
+
+                            for current_parameter_label in self.burstfitParameters.keys():
+                                current_list = self.burstfitParameters[current_parameter_label]
+                                current_uncertainties = bestfitUncertainties[current_parameter_label]
+                                print(f"    * {current_parameter_label}: {current_list} +/- {current_uncertainties}")        
+
+                            print("INFO: ratio of hessian matrix (approximate / exact):")
+                            print(fitter.hessian / fitter.hessian_approx)
+
+                        factor_time = max(1, int(round(150e-6/data.res_time)))      # ~150 µs plot bins
+                        half = int(round(0.015/data.res_time))                      # ±15 ms around the pulse
+                        i0 = int(round(self.burstfitParameters['arrival_time'][0]/data.res_time))
+                        lo = max(0, i0 - half); n = ((min(len(timesWindowed), i0 + half) - lo)//factor_time)*factor_time
+                        sl = slice(lo, lo + n)
+                        
+                        data_grouped = ff.ut.plotting.compute_downsampled_data(
+                            timesWindowed[sl], data.freqs, dataWindowed[:, sl], data.good_freq,
+                            spectrum_model=bestfitModel[:, sl], factor_freq=32, factor_time=factor_time)
+                        ff.ut.plotting.plot_summary_triptych(data_grouped, output_name=plotOut, show=False)
+
+    def build_model(self):
+        if self.modeled:
+            if self.modelFormat == 'separable':
+                modelT = self.profModel(self.time.to_value(u.ms),*self.poptT)-self.poptT[-1]
+                modelF = self.freq_function(self.freq.value,*self.poptF)-self.poptF[-1]
+                return(modelF[:,np.newaxis]*modelT)
+            else:
+                if 'rm' in self.burstfitParameters:
+                    model = ff.FaradaySpectrumModeler(
+                        self.freq.value,
+                        self.time.to_value(u.s),
+                        dm_incoherent = 0,
+                        factor_freq_upsample = 1,
+                        factor_time_upsample = 1,
+                        num_components = 1,
+                        is_dedispersed = True,
+                        is_folded = False,
+                        scintillation = False,
+                        verbose = False
+                    )
+                else:
+                    model = ff.SpectrumModeler(
+                        self.freq.value,
+                        self.time.to_value(u.s),
+                        dm_incoherent = 0,
+                        factor_freq_upsample = 1,
+                        factor_time_upsample = 1,
+                        num_components = 1,
+                        is_dedispersed = True,
+                        is_folded = False,
+                        scintillation = True,
+                        verbose = False
+                    )
+                data = ff.BURSTTDataReader(self,self.burstfitParameters,rbt=1)
+                data.preprocess_data(remove_baseline=True)
+                model.update_parameters(self.burstfitParameters)
+                return(model.compute_model(data=data.data_full))
+        return(np.ones(self.spec.shape))
+
     def apply_freq_mask(self,mask,nanVal=True):
         """
         Apply a mask to the data
@@ -349,12 +583,11 @@ class StationDump:
     def coherent_dedis(self,skipDM=False,**kwargs):
         upChan = self.spec.shape[1]
         dt = self.time[1]-self.time[0]
-        dt2 = dt*upChan
         spec2 = np.fft.fft(self.spec,axis=-1)
         fOff = np.fft.fftfreq(upChan,d=dt).to(u.MHz)
         phase = np.zeros(self.spec.shape)
         if not self.coherentDM and not skipDM:
-            phase -= 2*np.pi*(self.DM/K).to_value(u.Hz)*(fOff.to_value(u.Hz)[np.newaxis,:]**2)/(self.freq.to_value(u.Hz)[:,np.newaxis]**2 * (self.freq.to_value(u.Hz)[:,np.newaxis]+fOff.to_value(u.Hz)[np.newaxis,:]))
+            phase -= 2*np.pi*((self.DM-self.appliedDM)/K).to_value(u.Hz)*(fOff.to_value(u.Hz)[np.newaxis,:]**2)/(self.freq.to_value(u.Hz)[:,np.newaxis]**2 * (self.freq.to_value(u.Hz)[:,np.newaxis]+fOff.to_value(u.Hz)[np.newaxis,:]))
             self.appliedDM = self.DM*1
             self.coherentDM = True
         if "tauShiftAbs" in kwargs:

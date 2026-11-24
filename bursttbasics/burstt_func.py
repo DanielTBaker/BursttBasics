@@ -82,7 +82,7 @@ def frequency_model_polarized(f,A,n,RM,phi0,pf,N):
     """
     I0 = A*np.power(f/400,n)
     lam = (const.c/(f*u.MHz)).to(u.m)
-    I=I0*(1-pf + pf*np.cos(RM*lam.value**2+phi0)**2)
+    I=I0*(1 + pf*np.cos(2*RM*lam.value**2+2*phi0))
     return(I+N)
 
 def frequency_model(f,A,n,N):
