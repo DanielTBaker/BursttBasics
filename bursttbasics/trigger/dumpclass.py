@@ -462,7 +462,12 @@ class StationDump:
         f2 = np.reshape(self.freq,(-1,rbf)).mean(1)
         SNR,on = self.calc_SNR(t2,I2,freqMin=freqMin,freqMax=freqMax,meanSub=True)
         if self.modeled:
-            wts = self.profModel(self.time.to_value(u.ms),*self.poptT)-self.poptT[-1]
+            if self.modelFormat == 'fitburst':
+                M = self.build_model()
+                M[self.spec==np.nan]=np.nan
+                wts = np.nansum(M,0)
+            else:
+                wts = self.profModel(self.time.to_value(u.ms),*self.poptT)-self.poptT[-1]
             wts/=np.nansum(wts)
             SNRF = self.calc_spec(I,wts,noiseSub=True)
         else:
@@ -471,19 +476,19 @@ class StationDump:
             wts[wts<0]=0
             wts/=np.nansum(wts)
             SNRF = self.calc_spec(I2,wts,noiseSub=True)
-        
-        I2 = np.nanmean(np.reshape(I2,(self.spec.shape[0]//rbf,rbf,-1)),1)
+
+        I2b = np.nanmean(np.reshape(I2,(self.spec.shape[0]//rbf,rbf,-1)),1)
         ext = ext_find(t2.to(u.ms),f2)
         grid=plt.GridSpec(nrows=2,ncols=2,height_ratios=[1,4],width_ratios=[4,1],wspace=0,hspace=0)
         plt.figure(figsize=(8,8))
         plt.subplot(grid[1,0])
-        plt.imshow((I2-1)/np.nanstd(I2),origin='lower',aspect='auto',vmin=-2,vmax=4,extent=ext,cmap='cividis',interpolation='nearest')
+        plt.imshow((I2b-1)/np.nanstd(I2b),origin='lower',aspect='auto',vmin=-2,vmax=4,extent=ext,cmap='cividis',interpolation='nearest')
         plt.xlabel('Time (ms)')
         plt.ylabel('Frequency (MHz)')
         plt.subplot(grid[0,0])
         plt.plot(t2.to(u.ms),SNR,'k')
         # plt.axhline(0,ls='--',c='k',alpha=.5)
-        
+
         plt.text(t2.to(u.ms).min().value,SNR.max()*.9,f'SNR = {SNR.max():.2f}')
         try:
             SNR2,on = self.calc_SNR(t2,I2,freqMin=freqMin,freqMax=500*u.MHz,meanSub=True)
@@ -491,7 +496,14 @@ class StationDump:
         except:
             pass
         if showModel and self.modeled:
-            model = self.profModel(t2.to_value(u.ms),*self.poptT)-self.poptT[-1]
+            if self.modelFormat == 'fitburst':
+                M2 = np.nanmean(np.reshape(M[:,:rbt*(M.shape[1]//rbt)],(self.spec.shape[0],-1,rbt)),2)
+
+                model = np.nansum(M2[(self.freq.value>=freqMin)*(self.freq.value<=freqMax)],0)
+                SNR = np.nansum(I2[(self.freq.value>=freqMin)*(self.freq.value<=freqMax)],0)
+                model /= np.nanstd(SNR[np.invert(on)])
+            else:
+                model = self.profModel(t2.to_value(u.ms),*self.poptT)-self.poptT[-1]
             # model*=SNR.max()/model.max()
             plt.plot(t2.to(u.ms),model)
         plt.axvspan(t2[on].min().value,t2[on].max().value, alpha=0.5, color='green')
@@ -502,7 +514,12 @@ class StationDump:
         plt.subplot(grid[1,1])
         plt.plot(SNRF,self.freq,'k')
         if showModel and self.modeled:
-            model = self.freq_function(self.freq.value,*self.poptF)#-self.poptF[-1]
+            if self.modelFormat == 'fitburst':
+                NF = np.nansum(I * np.roll(wts, wts.shape[0] // 2), 1)
+                model = np.nansum(M * wts, 1) / NF
+                model[~np.isfinite(SNRF)] = np.nan
+            else:
+                model = self.freq_function(self.freq.value,*self.poptF)#-self.poptF[-1]
             plt.plot(model,self.freq)
         plt.ylim(ext[2:])
         plt.yticks([])
@@ -587,9 +604,12 @@ class StationDump:
         fOff = np.fft.fftfreq(upChan,d=dt).to(u.MHz)
         phase = np.zeros(self.spec.shape)
         if not self.coherentDM and not skipDM:
-            phase -= 2*np.pi*((self.DM-self.appliedDM)/K).to_value(u.Hz)*(fOff.to_value(u.Hz)[np.newaxis,:]**2)/(self.freq.to_value(u.Hz)[:,np.newaxis]**2 * (self.freq.to_value(u.Hz)[:,np.newaxis]+fOff.to_value(u.Hz)[np.newaxis,:]))
+            phase -= 2*np.pi*(self.DM/K).to_value(u.Hz)*(fOff.to_value(u.Hz)[np.newaxis,:]**2)/(self.freq.to_value(u.Hz)[:,np.newaxis]**2 * (self.freq.to_value(u.Hz)[:,np.newaxis]+fOff.to_value(u.Hz)[np.newaxis,:]))
             self.appliedDM = self.DM*1
             self.coherentDM = True
+        if 'dDM' in kwargs:
+            phase -= 2*np.pi*(kwargs['dDM']/K).to_value(u.Hz)*(fOff.to_value(u.Hz)[np.newaxis,:]**2)/(self.freq.to_value(u.Hz)[:,np.newaxis]**2 * (self.freq.to_value(u.Hz)[:,np.newaxis]+fOff.to_value(u.Hz)[np.newaxis,:]))
+            self.appliedDM += kwargs['dDM']
         if "tauShiftAbs" in kwargs:
             phase += 2*np.pi*((self.freq[:,np.newaxis]-fOff[np.newaxis,:])*(kwargs['tauShiftAbs']-self.removedDelay)).to_value(u.dimensionless_unscaled)
             self.removedDelay = kwargs['tauShiftAbs']

@@ -24,8 +24,10 @@ def get_peak_time(s0,width=2048,weight=True,idPeak=None):
                 modelT = s0.profModel(s0.time.to_value(u.ms),*s0.poptT)-s0.poptT[-1]
                 idPeak = np.argmax(modelT)
             else:
-                # scattering = s0.burstfitParameters['scattering_timescale']*(s0.freq.min().to_value(u.MHz)*s0.burstfitParameters['ref_freq'])**s0.burstfitParameters['scattering_index']
-                idPeak = np.round((s0.burstfitParameters['arrival_time']*u.s/sampleTime).to_value(u.dimensionless_unscaled))
+                longestTail = np.abs(s0.burstfitParameters['scattering_timescale'][0])*u.s*(s0.freq[0].to_value(u.MHz)/s0.burstfitParameters['ref_freq'][0])**s0.burstfitParameters['scattering_index'][0]
+                earliest = (s0.burstfitParameters['arrival_time'][0]-3*np.abs(s0.burstfitParameters['burst_width'][0]))*u.s
+                latest = (s0.burstfitParameters['arrival_time'][0]+3*np.abs(s0.burstfitParameters['burst_width'][0]))*u.s + 4*longestTail
+                idPeak =  int(np.round(((earliest+latest)/(2*sampleTime)).to_value(u.dimensionless_unscaled)))
         else:
             idPeak = s0.spec.shape[1]//2
     else:
@@ -77,11 +79,8 @@ def correlate_dump(s0,s1,
     tRef,idPeak = get_peak_time(s0,width,weight,idPeak)
     id0=idPeak-width//2
     if weight:
-        modelT = s0.profModel(s0.time.to_value(u.ms),*s0.poptT)-s0.poptT[-1]
-        modelF = s0.freq_function(f0.value,*s0.poptF)-s0.poptF[-1]
-        model = modelF[use0][:,np.newaxis]*modelT[id0:id0+width]
+        model = s0.build_model()[use0,id0:id0+width]
     
-
     ## Crop and conjugate spectrum from 1st station
     spec0 = np.conjugate(s0.spec[use0,id0:id0+width])
     ## Determine time from reference for each sample and correct rate
@@ -588,9 +587,7 @@ def sigma_est(s0,s1,maxOff=100,
     tRef,idPeak = get_peak_time(s0,width,weight,idPeak=idPeak)
     id0=idPeak-width//2
     if weight:
-        modelT = s0.profModel(s0.time.to_value(u.ms),*s0.poptT)-s0.poptT[-1]
-        modelF = s0.freq_function(f0.value,*s0.poptF)-s0.poptF[-1]
-        model = modelF[use0][:,np.newaxis]*modelT[id0:id0+width]
+        model = s0.build_model()[use0,id0:id0+width]
 
     ## Crop and conjugate spectrum from 1st station
     spec0 = np.conjugate(s0.spec[use0,id0:id0+width])

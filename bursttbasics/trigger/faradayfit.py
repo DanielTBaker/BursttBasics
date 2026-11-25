@@ -8,6 +8,22 @@ import fitburst.utilities as ut
 from fitburst.utilities import bases
 import astropy.units as u
 
+import fitburst.utilities.bases as _fb_bases
+import fitburst.analysis.fitter as _fb_fitter
+import fitburst.analysis.model as _fb_model
+
+_FB_MODULES = (_fb_bases, _fb_fitter, _fb_model)
+
+def fitburst_quiet(quiet=True):
+    """Silence (or restore) fitburst's print output: NaN warnings, 'bad data value', INFO lines."""
+    for m in _FB_MODULES:
+        if quiet:
+            m.print = lambda *a, **k: None
+        elif 'print' in vars(m):
+            del m.print
+
+fitburst_quiet(True) 
+
 class BURSTTDataReader(bases.ReaderBaseClass):
     def __init__(self,data, burstParameters, rbt = 1,fCenter=False):
         self.burst_parameters = {}
