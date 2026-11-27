@@ -1,4 +1,4 @@
-from astropy.coordinates import EarthLocation
+from astropy.coordinates import EarthLocation,Longitude, Latitude
 import astropy.units as u
 import numpy as np
 import os
@@ -56,7 +56,7 @@ yLocalF = -17.97*u.m
 zLocalF = -1.475*u.m
 NF = np.cos(3*u.deg)*yLocalF - np.sin(3*u.deg)*xLocalF
 EF = np.cos(3*u.deg)*xLocalF + np.sin(3*u.deg)*yLocalF
-FUSCenter = offset_location(FUSGNSS,NF,EF,zLocalF)
+FUSCenterOld = offset_location(FUSGNSS,NF,EF,zLocalF)
 
 ## Nantou Offsets
 xLocalN  = 3.254*u.m
@@ -64,10 +64,10 @@ yLocalN = 6.359*u.m
 zLocalN = -2.195*u.m
 NN = yLocalN
 EN = xLocalN
-LTNCenter = offset_location(LTNGNSS,NN,EN,zLocalN)
-LTNCenterOldShift = EarthLocation(x=LTNCenter.x +16.38823593*u.m,
-                          y=LTNCenter.y-13.27957413*u.m,
-                          z=LTNCenter.z-16.47346749*u.m)
+LTNCenterOld = offset_location(LTNGNSS,NN,EN,zLocalN)
+LTNCenterOldShift = EarthLocation(x=LTNCenterOld.x +16.38823593*u.m,
+                          y=LTNCenterOld.y-13.27957413*u.m,
+                          z=LTNCenterOld.z-16.47346749*u.m)
 
 # GRNCenter = EarthLocation(lon = 121.5007*u.deg,lat = 22.6750*u.deg,height = 15.0*u.m)
 GRNCenter = EarthLocation(lon = 121*u.deg + 30*u.arcmin+4.29131*u.arcsecond,
@@ -78,11 +78,19 @@ OGWCenter = EarthLocation(lon = 142*u.deg + 13*u.arcmin+0.87471*u.arcsecond,
                           lat = 27*u.deg + 5*u.arcmin + 31.14852*u.arcsecond,
                           height = 32.677*u.m)
 
-KMNCenter = EarthLocation(lon = 118*u.deg+20*u.arcmin+33.63267*u.arcsec,
+KMNCenterOld = EarthLocation(lon = 118*u.deg+20*u.arcmin+33.63267*u.arcsec,
                           lat = 24*u.deg+26*u.arcmin + 23.18364*u.arcsec,
                           height = 48.568*u.m
                           )
+
 PYCCenter = EarthLocation.from_geocentric(-3149184.935, 3966371.235, 3864897.162, unit=u.m)
+
+## From Novemver 2026 VLBI (updated 11/27/2026)
+LTNCenter = EarthLocation.from_geodetic(lon=Longitude('120d49m27.93916s'), lat=Latitude('23d42m52.68898s'), height=880.446*u.m)
+GRNCenter = EarthLocation.from_geodetic(lon=Longitude('121d30m04.37147s'), lat=Latitude('22d40m32.17692s'), height=32.677*u.m)
+KMNCenter = EarthLocation.from_geodetic(lon=Longitude('118d20m32.58025s'), lat=Latitude('24d26m23.18364s'), height=48.568*u.m)
+
+
 
 beamFile = 'beams_altaz_fus_16x16_b-7.5_-7.5_flim400_800_rot-3.0_sky400x700_ew-60_60_ns-70_70_att30n60_cal251027.npy'
 beamBounds = np.load(os.path.join(os.path.dirname(os.path.realpath(__file__)),beamFile), allow_pickle=True).item()
