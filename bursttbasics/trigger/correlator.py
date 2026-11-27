@@ -552,7 +552,7 @@ def sigma_est(s0,s1,maxOff=100,
                    baseOff=0*u.us,
                    width=2048,weight=True,idPeak=None,
                    rate=0*u.s*u.Hz,dDM = 0*u.pc/u.cm**3,
-                   progress=False,leave=True,mean=False,tauShift = 0*u.ns,meanSub=False
+                   progress=False,leave=True,mean=False,tauShift = 0*u.ns,meanSub=False,doNorm=True
                   ):
     """ 
     Correlate the data in two station dumps
@@ -617,7 +617,8 @@ def sigma_est(s0,s1,maxOff=100,
     cross = np.zeros(spec0.shape,dtype=spec0.dtype)
     cross[:,:] = spec0*s1.spec[use1,id0+baseOffIDX+startOff:id0+baseOffIDX+startOff+width]
     ## Normalize and apply weights
-    cross/=np.abs(cross)
+    if doNorm:
+        cross/=np.abs(cross)
     if weight:
         # cross/=np.abs(cross)
         cross*=model
@@ -636,8 +637,9 @@ def sigma_est(s0,s1,maxOff=100,
         norm = np.median(fAmp)
         V = np.fft.ifft(fCross[:,0])/norm
     dphi = np.angle(cross*np.conj(V)[:, np.newaxis])
-    if weight:
-        sigmaPerp = np.sqrt(np.nansum((model/norm)**2 * np.sin(dphi)**2, axis=1))
+    
+    if weight or (not doNorm):
+        sigmaPerp = np.sqrt(np.nansum((np.abs(cross)/norm)**2 * np.sin(dphi)**2, axis=1))
     else:
         sigmaPerp = np.sqrt(np.nansum((1/norm)**2 * np.sin(dphi)**2, axis=1))
     if mean:
