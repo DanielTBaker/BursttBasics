@@ -56,7 +56,7 @@ yLocalF = -17.97*u.m
 zLocalF = -1.475*u.m
 NF = np.cos(3*u.deg)*yLocalF - np.sin(3*u.deg)*xLocalF
 EF = np.cos(3*u.deg)*xLocalF + np.sin(3*u.deg)*yLocalF
-FUSCenterOld = offset_location(FUSGNSS,NF,EF,zLocalF)
+FUSCenter = offset_location(FUSGNSS,NF,EF,zLocalF)
 
 ## Nantou Offsets
 xLocalN  = 3.254*u.m

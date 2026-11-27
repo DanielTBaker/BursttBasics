@@ -148,7 +148,7 @@ class StationDump:
         self.spec[v2.mask]=np.nan
         self.clipped = True
 
-    def rm_grid(self,Ion,mask,rmMax=120,rmNum = 600,aLow = -5, aHigh = 0, aNum = 25):
+    def rm_grid(self,Ion,mask,rmMin=1,rmMax=120,rmNum = 600,aLow = -5, aHigh = 0, aNum = 25):
         bestChi = np.inf
         x = self.freq[mask].value/400
         lam2 = (const.c/self.freq[mask]).to_value(u.m)**2
@@ -158,7 +158,7 @@ class StationDump:
         N = 0
         rm = 0
         a = 0
-        for RMSearch in np.linspace(1,rmMax,rmNum):
+        for RMSearch in np.linspace(rmMin,rmMax,rmNum):
             theta = 2* RMSearch * lam2
             for aSearch in np.linspace(aLow,aHigh,aNum):
                 xa = x**aSearch
@@ -187,6 +187,7 @@ class StationDump:
         prof,on = self.calc_SNR(t2,I2,meanSub=False,freqMin=freqMin,freqMax=freqMax)
         if 'p0t' in kwargs:
             self.poptT = kwargs['p0t']
+            
         else:
             t0 = t2[np.argmax(prof)].value
             N = np.median(prof)
@@ -212,7 +213,12 @@ class StationDump:
                 # A0 = (np.max(spec[fmask]))*(self.freq[fmask][np.argmax(spec[fmask])]/(400*u.MHz))**2
                 
                 # self.poptF = [A0,-2,50,0,.5,0]
-                self.poptF = list(self.rm_grid(spec,fmask))
+                rmKwargs={}
+                if 'rmMin' in kwargs:
+                    rmKwargs.update({'rmMin' : kwargs['rmMin']})
+                if 'rmMax' in kwargs:
+                    rmKwargs.update({'rmMax' : kwargs['rmMax']})
+                self.poptF = list(self.rm_grid(spec,fmask,**rmKwargs))
             if self.poptF[2]<2:
                 self.freq_function = frequency_model
                 self.poptF = [self.poptF[0],self.poptF[1],self.poptF[-1]]
@@ -220,6 +226,9 @@ class StationDump:
                                                        spec[fmask],p0=self.poptF,maxfev=10000,
                                                        bounds = ((0,-np.inf,-np.inf),(np.inf,np.inf,np.inf)),method='dogbox')
             else:
+                self.poptF[0] = max(self.poptF[0], 1e-6)                      # A >= 0
+                self.poptF[1] = min(self.poptF[1], 0.)                        # spectral index <= 0
+                self.poptF[4] = float(np.clip(abs(self.poptF[4]), 0.01, 0.99))
                 self.poptF,pcov = curve_fit(self.freq_function,self.freq[fmask].value,
                                     spec[fmask],p0=self.poptF,maxfev=10000,
                                     bounds = ((0,-np.inf,-np.inf,-np.inf,0,-np.inf),(np.inf,0,np.inf,np.inf,1,np.inf)),method='dogbox')
@@ -615,7 +624,7 @@ class StationDump:
             self.removedDelay = kwargs['tauShiftAbs']
         if "tauShift" in kwargs:
             phase += 2*np.pi*((self.freq[:,np.newaxis]-fOff[np.newaxis,:])*kwargs['tauShift']).to_value(u.dimensionless_unscaled)
-            self.removedDelay += kwargs['tauShift']
+            self.removedDelay = self.removedDelay + kwargs['tauShift']
         spec2*= np.exp(-1j*phase)
         self.spec = np.fft.ifft(spec2,axis=-1).astype(np.complex64)
 

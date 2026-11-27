@@ -511,7 +511,9 @@ class CorrelationResult:
     ## Diagnostics
     SNR: Optional[float] = None
 
+
     ## Other
+    pulseFit : Optional[dict] = None
     extra: dict = field(default_factory=dict)
     
     @property
