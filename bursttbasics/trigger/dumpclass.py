@@ -175,6 +175,96 @@ class StationDump:
                     a = aSearch
         return(A,a,rm,phi0,pf,N)
 
+    def rm_grid_running(self,Ion,mask,
+                        rmMin=1,rmMax=120,rmNum = 600,
+                        aMin = -10, aMax = 10, aNum = 35,
+                        rMin =-80, rMax =80 , rNum = 50,
+                        aPerChunk = 10,
+                        ):
+            bestChi = np.inf
+
+            ## x coordinate arrays
+            x = self.freq[mask].value/400
+            lnx = np.log(x)
+            lnx2 = lnx**2
+            lam2 = (const.c/self.freq[mask]).to_value(u.m)**2
+
+            ## Grids
+            aGrid = np.linspace(aMin,aMax,aNum)
+            rGrid = np.linspace(rMin,rMax,rNum)
+            rmGrid = np.linspace(rmMin,rmMax,rmNum)
+            #RM Cos terms:
+            C = np.cos(2*rmGrid[None,:]*lam2[:,None])
+            ## RM Sin Terms
+            S = np.sin(2*rmGrid[None,:]*lam2[:,None])
+            ## Square terms
+            CC = C**2
+            SS = S**2
+            CS = C*S
+
+            sumII = Ion[mask] @ Ion[mask]
+            sumI = np.sum(Ion[mask])
+
+            for aChunkStart in range(0,aNum,aPerChunk):
+                ## Within chunk a grid
+                aGridChunk = aGrid[aChunkStart:aChunkStart+aPerChunk]
+                ## Background calculation
+                lnB = aGridChunk[:,None,None]*lnx + rGrid[None,:,None]*lnx2
+                checkZero = ((aGridChunk[:,None]==0) & (rGrid[None,:]==0)).reshape(-1)
+                lnB = lnB - lnB.max(-1, keepdims=True)
+                B = np.exp(lnB).reshape(-1,x.shape[0])
+                BB = B**2
+                BI = B*Ion[mask]
+
+                shape = (B.shape[0],rmGrid.shape[0])
+
+                sumBB = np.broadcast_to(BB.sum(1)[:, None], shape)
+                sumB = np.broadcast_to(B.sum(1)[:, None], shape)
+                sumBI = np.broadcast_to(BI.sum(1)[:, None], shape)
+
+                sumN = np.full(shape, float(x.shape[0]))
+                sumIrhs = np.full(shape, sumI) 
+
+                sumBC = B @ C
+                sumBS = B @ S
+                sumBBC = BB @ C
+                sumBBS = BB @ S
+                sumBBCC = BB @ CC
+                sumBBCS = BB @ CS
+                sumBBSS = BB @ SS
+                sumBIC = BI @ C
+                sumBIS = BI @ S
+
+                firstCoef = np.stack([sumBB, sumBBC, sumBBS, sumB], -1) # (B.shape[0],rmNum,4)
+                secondCoef = np.stack([sumBBC, sumBBCC, sumBBCS, sumBC], -1) # (B.shape[0],rmNum,4)
+                thirdCoef = np.stack([sumBBS, sumBBCS, sumBBSS, sumBS], -1) # (B.shape[0],rmNum,4)
+                fourthCoef = np.stack([sumB, sumBC, sumBS, sumN], -1) # (B.shape[0],rmNum,4)
+                LHS = np.stack([firstCoef,secondCoef,thirdCoef,fourthCoef], -2) # (B.shape[0],rmNum,4,4)
+                RHS = np.stack([sumBI,sumBIC,sumBIS,sumIrhs],-1)
+                LHS[checkZero] = np.eye(4)
+
+                coef = np.linalg.solve(LHS, RHS[..., None])[..., 0] 
+                chi = sumII - np.einsum('...i,...i', coef, RHS)
+                chi[checkZero] = np.inf
+                iBest = np.argmin(chi)
+                kBest = iBest // rmNum
+                jBest = iBest % rmNum 
+                if chi[kBest, jBest] < bestChi:
+                    bestChi = chi[kBest, jBest]
+                    ia = kBest // rNum
+                    ir = kBest % rNum
+                    bestA = aGridChunk[ia]
+                    bestR = rGrid[ir]
+                    bestRM = rmGrid[jBest]
+                    bestCoef = coef[kBest, jBest]
+
+            scale = np.exp(-(bestA * lnx + bestR * lnx**2).max())
+            amp = bestCoef[0] * scale
+            pf = np.sqrt(bestCoef[1]**2 + bestCoef[2]**2) / bestCoef[0]
+            phi0 = np.arctan2(-bestCoef[2], bestCoef[1]) / 2.
+            N = bestCoef[3]
+            return(amp, bestA, bestR, bestRM, phi0, pf, N)
+
     def fit_spec(self,polFit=True,rbin=400,freqMin = -np.inf,freqMax = np.inf,profModel=gau1,**kwargs):
         """
         Fit a simple pulse profile to the spectrum
@@ -206,7 +296,7 @@ class StationDump:
         if 'mask' in kwargs:
             fmask*=kwargs['mask']
         if polFit:
-            self.freq_function = frequency_model_polarized
+            self.freq_function = frequency_model_polarized2
             if 'p0f' in kwargs:
                 self.poptF = kwargs['p0f']
             else:
@@ -214,24 +304,23 @@ class StationDump:
                 
                 # self.poptF = [A0,-2,50,0,.5,0]
                 rmKwargs={}
-                if 'rmMin' in kwargs:
-                    rmKwargs.update({'rmMin' : kwargs['rmMin']})
-                if 'rmMax' in kwargs:
-                    rmKwargs.update({'rmMax' : kwargs['rmMax']})
-                self.poptF = list(self.rm_grid(spec,fmask,**rmKwargs))
-            if self.poptF[2]<2:
+                for arg in [f'{x}{y}' for x in ['rm','a','r'] for y in ['Min','Max','Num']]:
+                    if arg in kwargs:
+                        rmKwargs.update({arg : kwargs[arg]})
+                self.poptF = list(self.rm_grid_running(spec,fmask,**rmKwargs))
+            if self.poptF[3]<2:
                 self.freq_function = frequency_model
-                self.poptF = [self.poptF[0],self.poptF[1],self.poptF[-1]]
+                self.poptF = [self.poptF[0],-2,self.poptF[-1]]
                 self.poptF,pcov = curve_fit(self.freq_function,self.freq[fmask].value,
                                                        spec[fmask],p0=self.poptF,maxfev=10000,
                                                        bounds = ((0,-np.inf,-np.inf),(np.inf,np.inf,np.inf)),method='dogbox')
             else:
                 self.poptF[0] = max(self.poptF[0], 1e-6)                      # A >= 0
-                self.poptF[1] = min(self.poptF[1], 0.)                        # spectral index <= 0
-                self.poptF[4] = float(np.clip(abs(self.poptF[4]), 0.01, 0.99))
+                self.poptF[5] = float(np.clip(abs(self.poptF[5]), 0.01, 0.99))
                 self.poptF,pcov = curve_fit(self.freq_function,self.freq[fmask].value,
                                     spec[fmask],p0=self.poptF,maxfev=10000,
-                                    bounds = ((0,-np.inf,-np.inf,-np.inf,0,-np.inf),(np.inf,0,np.inf,np.inf,1,np.inf)),method='dogbox')
+                                    bounds = ((0,-np.inf,-np.inf,-np.inf,-np.inf,0,-np.inf),(np.inf,np.inf,np.inf,np.inf,np.inf,1,np.inf)),method='dogbox')
+                self.poptF[5] = float(np.clip(abs(self.poptF[5]), 0.01, 0.99))
         else:
             self.freq_function = frequency_model
             if 'p0f' in kwargs:
@@ -258,6 +347,7 @@ class StationDump:
                         "scattering_timescale" : [.00001],
                         "spectral_index"       : [-2.0],
                         "spectral_running"     : [0.0]}
+        
         if 'arrival_time' in kwargs:
             initialParameters['arrival_time'] = [kwargs['arrival_time']]
         elif hasattr(self,'poptT'):
@@ -270,25 +360,33 @@ class StationDump:
             initialParameters['scattering_timescale'] = [kwargs['scattering_timescale']]
         elif hasattr(self,'poptT'):
             initialParameters['scattering_timescale'] = [self.poptT[2]/2000]
-        if polFit or self.freq_function == frequency_model_polarized:
+        if polFit or self.freq_function == frequency_model_polarized2:
             if 'rm' in kwargs:
                 initialParameters.update({'rm' : [kwargs['rm']]})
-            elif self.freq_function == frequency_model_polarized:
-                initialParameters.update({'rm' : [self.poptF[2]]})
+            elif self.freq_function == frequency_model_polarized2:
+                initialParameters.update({'rm' : [self.poptF[3]]})
             else:
                 initialParameters.update({'rm' : [-42.0]})
             if 'polarization_fraction' in kwargs:
                 initialParameters.update({'polarization_fraction' : [kwargs['polarization_fraction']]})
-            elif self.freq_function == frequency_model_polarized:
-                initialParameters.update({'polarization_fraction' : [self.poptF[4]]})
+            elif self.freq_function == frequency_model_polarized2:
+                initialParameters.update({'polarization_fraction' : [sigmoid_inv(self.poptF[5])]})
             else:
-                initialParameters.update({'polarization_fraction' : [.5]})
+                initialParameters.update({'polarization_fraction' : [sigmoid_inv(.5)]})
             if 'phi0' in kwargs:
                 initialParameters.update({'phi0' : [kwargs['phi0']]})
-            elif self.freq_function == frequency_model_polarized:
-                initialParameters.update({'phi0' : [self.poptF[3]]})
+            elif self.freq_function == frequency_model_polarized2:
+                initialParameters.update({'phi0' : [self.poptF[4]]})
             else:
                 initialParameters.update({'phi0' : [0.0]})
+            if 'spectral_index' in kwargs:
+                initialParameters.update({'spectral_index' : [kwargs['spectral_index']]})
+            elif self.freq_function == frequency_model_polarized2:
+                initialParameters.update({'spectral_index' : [self.poptF[1]]})
+            if 'spectral_running' in kwargs:
+                initialParameters.update({'spectral_running' : [kwargs['spectral_running']]})
+            elif self.freq_function == frequency_model_polarized2:
+                initialParameters.update({'spectral_running' : [self.poptF[2]]})
         self.burstfitParameters = initialParameters.copy()
         data = ff.BURSTTDataReader(self,initialParameters,rbt=rbt)
         data.preprocess_data(remove_baseline=True)
@@ -332,7 +430,7 @@ class StationDump:
         model.update_parameters(initialParameters)
 
         for currentIteration in range(numIterations):
-            fitter = ff.fb.analysis.fitter.LSFitter(dataWindowed, model, data.good_freq)
+            fitter = ff.ExtendedFitter(dataWindowed, model, data.good_freq)
             fitter.global_parameters.append("rm")
             fitter.fix_parameter(parametersToFix)
             fitter.fit(exact_jacobian=True)

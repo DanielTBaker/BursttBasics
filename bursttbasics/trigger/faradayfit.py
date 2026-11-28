@@ -8,9 +8,12 @@ import fitburst.utilities as ut
 from fitburst.utilities import bases
 import astropy.units as u
 
+from bursttbasics.burstt_func import sigmoid,sigmoid_dir,sigmoid_dir2
+
 import fitburst.utilities.bases as _fb_bases
 import fitburst.analysis.fitter as _fb_fitter
 import fitburst.analysis.model as _fb_model
+from scipy.optimize import least_squares
 
 _FB_MODULES = (_fb_bases, _fb_fitter, _fb_model)
 
@@ -23,6 +26,8 @@ def fitburst_quiet(quiet=True):
             del m.print
 
 fitburst_quiet(True) 
+
+
 
 class BURSTTDataReader(bases.ReaderBaseClass):
     def __init__(self,data, burstParameters, rbt = 1,fCenter=False):
@@ -312,7 +317,7 @@ class FaradaySpectrumModeler(SpectrumModeler):
 
                 current_profile_faraday_free = current_profile.copy()
 
-                current_profile *= (1+ current_pol_frac *np.cos(2*current_rm*(299792458.0**2)/(current_freq_arr*1e6)**2 + 2*current_phi0))[:,None]
+                current_profile *= (1+ sigmoid(current_pol_frac) *np.cos(2*current_rm*(299792458.0**2)/(current_freq_arr*1e6)**2 + 2*current_phi0))[:,None]
 
                 # before writing, downsize upsampled array to original size.
                 current_profile = rt.manipulate.downsample_1d(
@@ -326,7 +331,7 @@ class FaradaySpectrumModeler(SpectrumModeler):
                     current_ref_freq,
                     current_sp_idx,
                     current_sp_run
-                ) * (10 ** current_amplitude) * (1+ current_pol_frac *np.cos(2*current_rm*(299792458**2)/(self.freqs[current_freq]*1e6)**2 + 2*current_phi0))
+                ) * (10 ** current_amplitude) * (1+ sigmoid(current_pol_frac) *np.cos(2*current_rm*(299792458**2)/(self.freqs[current_freq]*1e6)**2 + 2*current_phi0))
                 self.spectrum_per_component[current_freq, :, current_component] = (10 ** current_amplitude) * current_profile
                 self.faraday_free_per_component[current_freq, :, current_component] = (10 ** current_amplitude) * rt.manipulate.downsample_1d(current_profile_faraday_free.mean(axis=0), self.factor_time_upsample)
 
@@ -353,6 +358,68 @@ class FaradaySpectrumModeler(SpectrumModeler):
 
         return np.sum(self.spectrum_per_component, axis=2)
 
+class ExtendedFitter(fb.analysis.fitter.LSFitter):
+    def __init__(self, data: float, model: object, good_freq: bool, weighted_fit: bool = True, 
+                 weight_range: list = None, x_scale: str = 'jac'):
+        super().__init__(data,model,good_freq,weighted_fit,weight_range)
+        self.x_scale = x_scale
+
+    def fit(self, exact_jacobian: bool = True) -> None:
+        """
+        Executes least-squares fitting of the model spectrum to data, and stores
+        results to child class.
+
+        Parameters
+        ----------
+        exact_jacobian : bool, optional
+            If set, then use the exact formulation of the Jacobian and supply it 
+            as method for the solver to use.
+
+        Returns
+        -------
+        None
+            A dictionary attribute is defined that contains the best-fit results from
+            the scipy.optimize.least_aquares solver, as well as estimates of the
+            covariance matrix and parameter uncertainties.
+        """
+
+        # pylint: disable=broad-except
+
+        # convert loaded parameter dictionary/entries into a list for scipy object.
+        parameter_list = self.get_fit_parameters_list()
+
+        # if desired, use exact formulation of Jacobian.
+        jac = "2-point"
+
+        if exact_jacobian:
+            jac = self.compute_jacobian
+
+        # do fit!
+        try:
+            results = least_squares(
+                self.compute_residuals, 
+                parameter_list,
+                jac = jac,
+                x_scale = self.x_scale
+            )
+
+            self.results = results
+
+            if self.results.success:
+                print("INFO: fit successful!")
+
+            else:
+                print("INFO: fit didn't work!")
+
+            # now try computing uncertainties and fit statistics.
+            self._compute_fit_statistics(self.data, results)
+
+            if self.success:
+                print("INFO: derived uncertainties and fit statistics")
+
+        except Exception as exc:
+            print("ERROR: solver encountered a failure! Debug!")
+            print(_fb_fitter.traceback.format_exc())
 
 def _faraday_terms(parameters, model, component):
     lam2 = 299792458.0**2 / (model.freqs * 1e6)**2                        # (nfreq,)
@@ -368,46 +435,46 @@ def deriv_model_wrt_rm(parameters: dict, model: object, component: int = 0) -> f
     out = 0.
     for c in range(model.num_components):
         lam2, p, theta, M0 = _faraday_terms(parameters, model, c)
-        out = out + M0 * (-2 * p * lam2 * np.sin(theta))[:, None]
+        out = out + M0 * (-2 * sigmoid(p) * lam2 * np.sin(theta))[:, None]
     return out
 
 def deriv_model_wrt_phi0(parameters: dict, model: object, component: int = 0) -> float:
     """dM/dRM = sum over components of -M0_c * p_c * sin(theta_c) * 2 lam^2  (rm is global)."""
     lam2, p, theta, M0 = _faraday_terms(parameters, model, component)
-    return M0 * (-2 * p * np.sin(theta))[:, None]
+    return M0 * (-2 * sigmoid(p) * np.sin(theta))[:, None]
 
 def deriv_model_wrt_polarization_fraction(parameters: dict, model: object, component: int = 0) -> float:
     """dM/dp = M0 * cos(theta)  (per component)."""
     lam2, p, theta, M0 = _faraday_terms(parameters, model, component)
-    return M0 * np.cos(theta)[:, None]
+    return M0 * (sigmoid_dir(p) * np.cos(theta))[:, None]
 
 
 def deriv2_model_wrt_rm_rm(parameters: dict, model: object, component: int = 0) -> float:
     out = 0.
     for c in range(model.num_components):
         lam2, p, theta, M0 = _faraday_terms(parameters, model, c)
-        out = out + M0 * (-4 * p * lam2**2 * np.cos(theta))[:, None]
+        out = out + M0 * (-4 * sigmoid(p) * lam2**2 * np.cos(theta))[:, None]
     return out
 
 def deriv2_model_wrt_rm_phi0(parameters: dict, model: object, component: int = 0) -> float:
     lam2, p, theta, M0 = _faraday_terms(parameters, model, component)
-    return M0 * (-4 * p * lam2 * np.cos(theta))[:, None]
+    return M0 * (-4 * sigmoid(p) * lam2 * np.cos(theta))[:, None]
 
 def deriv2_model_wrt_rm_polarization_fraction(parameters: dict, model: object, component: int = 0) -> float:
     lam2, p, theta, M0 = _faraday_terms(parameters, model, component)
-    return  M0 * (-2 * lam2 * np.sin(theta))[:, None]
+    return  M0 * (-2 * sigmoid_dir(p) * lam2 * np.sin(theta))[:, None]
 
 def deriv2_model_wrt_phi0_phi0(parameters: dict, model: object, component: int = 0) -> float:
     lam2, p, theta, M0 = _faraday_terms(parameters, model, component)
-    return M0 * (-4 * p * np.cos(theta))[:, None]
+    return M0 * (-4 * sigmoid(p) * np.cos(theta))[:, None]
 
 def deriv2_model_wrt_phi0_polarization_fraction(parameters: dict, model: object, component: int = 0) -> float:
     lam2, p, theta, M0 = _faraday_terms(parameters, model, component)
-    return M0 * (-2 * np.sin(theta))[:, None]
+    return M0 * (-2 * sigmoid_dir(p) * np.sin(theta))[:, None]
 
 def deriv2_model_wrt_polarization_fraction_polarization_fraction(parameters: dict, model: object, component: int = 0) -> float:
     lam2, p, theta, M0 = _faraday_terms(parameters, model, component)
-    return M0 * 0
+    return M0 * (sigmoid_dir2(p) *np.cos(theta))[:,None]
 
 deriv.deriv_model_wrt_rm = deriv_model_wrt_rm
 deriv.deriv_model_wrt_phi0 = deriv_model_wrt_phi0
@@ -424,18 +491,18 @@ def make_old_new(old,new):
     if new == 'rm':
         def f(parameters: dict, model: object, component: int = 0) -> float:
             lam2, p, theta, M0 = _faraday_terms(parameters, model, component)
-            F = 1 + p*np.cos(theta)
-            return(d1(parameters,model,component) * (-2*p*lam2*np.sin(theta)/F)[:,None])
+            F = 1 + sigmoid(p)*np.cos(theta)
+            return(d1(parameters,model,component) * (-2*sigmoid(p)*lam2*np.sin(theta)/F)[:,None])
     if new == 'phi0':
         def f(parameters: dict, model: object, component: int = 0) -> float:
             lam2, p, theta, M0 = _faraday_terms(parameters, model, component)
-            F = 1 + p*np.cos(theta)
-            return(d1(parameters,model,component) * (-2*p*np.sin(theta)/F)[:,None])
+            F = 1 + sigmoid(p)*np.cos(theta)
+            return(d1(parameters,model,component) * (-2*sigmoid(p)*np.sin(theta)/F)[:,None])
     if new == 'polarization_fraction':
         def f(parameters: dict, model: object, component: int = 0) -> float:
             lam2, p, theta, M0 = _faraday_terms(parameters, model, component)
-            F = 1 + p*np.cos(theta)
-            return(d1(parameters,model,component) * (np.cos(theta)/F)[:,None])
+            F = 1 + sigmoid(p)*np.cos(theta)
+            return(d1(parameters,model,component) * (sigmoid_dir(p) * np.cos(theta)/F)[:,None])
     f.__name__ = f'deriv2_model_wrt_{old}_{new}'
     return(f)
 for O in [ "amplitude","arrival_time","burst_width","dm","dm_index","scattering_index", "scattering_timescale","spectral_index","spectral_running"]:

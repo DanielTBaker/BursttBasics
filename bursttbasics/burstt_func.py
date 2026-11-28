@@ -85,6 +85,30 @@ def frequency_model_polarized(f,A,n,RM,phi0,pf,N):
     I=I0*(1 + pf*np.cos(2*RM*lam.value**2+2*phi0))
     return(I+N)
 
+def frequency_model_polarized2(f,A,n,n2,RM,phi0,pf,N):
+    """
+    Pulse Spectral profile with RM fluctuations
+
+    Parameters
+    ===========
+    f - numpy array
+        Observing Frequency
+    A - float
+        Pulse Amplitude
+    n - float
+        Pulse spectral index
+    RM -  float
+        Pulse Rotation Measure
+    phi0 - float
+        RM Phase at 400MHz
+    pf - float
+        Polarization Fraction
+    """
+    I0 = A*np.exp(n*np.log(f/400)+n2*np.log(f/400)**2)
+    lam = (const.c/(f*u.MHz)).to(u.m)
+    I=I0*(1 + pf*np.cos(2*RM*lam.value**2+2*phi0))
+    return(I+N)
+
 def frequency_model(f,A,n,N):
     """
     Pulse Spectral profile with RM fluctuations
@@ -350,3 +374,18 @@ def rho_from_projection(theta, V, sigC, f, ok):
     rho = np.clip(A0*(f/400)**al, 0, None)/sigC
     rho[~ok] = np.nan
     return rho, A0, al
+
+
+def sigmoid(x):
+    return 1 / (1 + np.exp(-x))
+
+def sigmoid_dir(x):
+    s = sigmoid(x)
+    return(s*(1-s))
+
+def sigmoid_dir2(x):
+    s = sigmoid(x)
+    return(s*(2*s**2-3*s+1))
+
+def sigmoid_inv(s):
+    return(-np.log(1./s - 1.))
